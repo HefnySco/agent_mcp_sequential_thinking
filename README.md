@@ -32,10 +32,10 @@ The MCP server is configured via environment variables in `mcp.json`:
   "mcpServers": {
     "sequential": {
       "command": "node",
-      "args": ["/home/mhefny/code/mcp/sequential-mcp/dist/index.js"],
+      "args": ["/path/to/sequential-mcp/dist/index.js"],
       "env": {
-        "SEQUENTIAL_STORAGE_PATH": "/home/mhefny/code/mcp/sequential-mcp/sequential-storage.json",
-        "SEQUENTIAL_OUTPUT_DIR": "/home/mhefny/code/mcp/sequential-mcp/output"
+        "SEQUENTIAL_STORAGE_PATH": "/path/to/sequential-mcp/sequential-storage.json",
+        "SEQUENTIAL_OUTPUT_DIR": "/path/to/sequential-mcp/output"
       }
     }
   }

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "sequential": {
+      "command": "node",
+      "args": ["/home/mhefny/code/mcp/sequential-mcp/dist/index.js"],
+      "env": {
+        "SEQUENTIAL_STORAGE_PATH": "/home/mhefny/code/mcp/sequential-mcp/sequential-storage.json",
+        "SEQUENTIAL_OUTPUT_DIR": "/home/mhefny/code/mcp/sequential-mcp/output"
+      }
+    }
+  }
+}

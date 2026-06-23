@@ -6,6 +6,7 @@ import {
   WorkflowNotFoundError,
   TaskExecutionError
 } from './errors.js';
+import type { Task } from './types.js';
 import { 
   CreateTaskSchema, 
   UpdateTaskSchema, 
@@ -21,7 +22,8 @@ import {
   StartWorkflowExecutionSchema,
   AdvanceWorkflowRunSchema,
   GetWorkflowRunSchema,
-  GetNextWorkflowTasksSchema
+  GetNextWorkflowTasksSchema,
+  CleanupWorkflowRunsSchema
 } from './validation.js';
 import { ERROR_MESSAGES } from './constants.js';
 
@@ -49,20 +51,28 @@ export async function handleCreateTask(
     name: validated.name,
     description: validated.description,
     dependencies: validated.dependencies,
+    parentTaskId: validated.parentTaskId,
     metadata: validated.metadata,
     maxRetries: validated.maxRetries
   });
 
-  await service.save();
+  await service.forceSave();
+
+  let parentInfo = '';
+  if (task.parentTaskId) {
+    const parentTask = service.getTask(task.parentTaskId);
+    if (parentTask) {
+      parentInfo = `\n**Parent Task:** ${parentTask.name} (ID: ${task.parentTaskId})`;
+    } else {
+      parentInfo = `\n**Parent Task ID:** ${task.parentTaskId}`;
+    }
+  }
 
   const result = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          message: 'Task created successfully',
-          task
-        }, null, 2)
+        text: `✅ Task created successfully\n\n**Name:** ${task.name}\n**ID:** ${task.id}\n**Status:** ${task.status}\n**Dependencies:** ${task.dependencies.length}${parentInfo}\n**Created:** ${task.createdAt}`
       }
     ]
   };
@@ -87,6 +97,7 @@ export async function handleUpdateTask(
   if (validated.name !== undefined) updates.name = validated.name;
   if (validated.description !== undefined) updates.description = validated.description;
   if (validated.dependencies !== undefined) updates.dependencies = validated.dependencies;
+  if (validated.parentTaskId !== undefined) updates.parentTaskId = validated.parentTaskId;
   if (validated.metadata !== undefined) updates.metadata = validated.metadata;
 
   const task = service.updateTask(validated.id, updates);
@@ -95,16 +106,23 @@ export async function handleUpdateTask(
     throw new TaskNotFoundError(validated.id);
   }
 
-  await service.save();
+  await service.forceSave();
+
+  let parentInfo = '';
+  if (task.parentTaskId) {
+    const parentTask = service.getTask(task.parentTaskId);
+    if (parentTask) {
+      parentInfo = `\n**Parent Task:** ${parentTask.name} (ID: ${task.parentTaskId})`;
+    } else {
+      parentInfo = `\n**Parent Task ID:** ${task.parentTaskId}`;
+    }
+  }
 
   const result = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          message: 'Task updated successfully',
-          task
-        }, null, 2)
+        text: `✅ Task updated successfully\n\n**Name:** ${task.name}\n**ID:** ${task.id}\n**Status:** ${task.status}${parentInfo}\n**Updated:** ${task.updatedAt}`
       }
     ]
   };
@@ -131,16 +149,13 @@ export async function handleDeleteTask(
     throw new TaskNotFoundError(validated);
   }
 
-  await service.save();
+  await service.forceSave();
 
   const result = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          message: 'Task deleted successfully',
-          id: validated
-        }, null, 2)
+        text: `✅ Task deleted successfully\n\n**Deleted Task ID:** ${validated}`
       }
     ]
   };
@@ -167,13 +182,28 @@ export async function handleGetTask(
     throw new TaskNotFoundError(validated);
   }
 
+  let parentInfo = '';
+  if (task.parentTaskId) {
+    const parentTask = service.getTask(task.parentTaskId);
+    if (parentTask) {
+      parentInfo = `\n**Parent Task:** ${parentTask.name} (ID: ${task.parentTaskId})`;
+    } else {
+      parentInfo = `\n**Parent Task ID:** ${task.parentTaskId}`;
+    }
+  }
+
+  // Get subtasks
+  const subtasks = service.getSubtasks(task.id);
+  let subtaskInfo = '';
+  if (subtasks.length > 0) {
+    subtaskInfo = `\n**Subtasks (${subtasks.length}):**\n${subtasks.map(st => `  - ${st.name} (${st.status})`).join('\n')}`;
+  }
+
   const result = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          task
-        }, null, 2)
+        text: `📋 Task Details\n\n**Name:** ${task.name}\n**ID:** ${task.id}\n**Status:** ${task.status}${parentInfo}${subtaskInfo}\n**Created:** ${task.createdAt}\n**Updated:** ${task.updatedAt}`
       }
     ]
   };
@@ -200,15 +230,44 @@ export async function handleListTasks(
     tasks = service.getAllTasks();
   }
 
+  const completedCount = tasks.filter(t => t.status === 'completed').length;
+  
+  // Group tasks by parent/child relationship
+  const parentTasks = tasks.filter(t => !t.parentTaskId);
+  const childTasks = tasks.filter(t => t.parentTaskId);
+  
+  let taskList = '';
+  
+  // First list parent tasks
+  parentTasks.forEach(t => {
+    const icon = t.status === 'completed' ? '✅' : '⚪';
+    taskList += `${icon} ${t.name} (ID: ${t.id})\n`;
+    
+    // Then list its subtasks
+    const subtasks = childTasks.filter(c => c.parentTaskId === t.id);
+    if (subtasks.length > 0) {
+      subtasks.forEach(st => {
+        const subIcon = st.status === 'completed' ? '✅' : '⚪';
+        taskList += `  ${subIcon} └─ ${st.name} (ID: ${st.id})\n`;
+      });
+    }
+  });
+  
+  // List orphaned tasks (children whose parent doesn't exist in current list)
+  const orphanedTasks = childTasks.filter(c => !parentTasks.find(p => p.id === c.parentTaskId));
+  if (orphanedTasks.length > 0) {
+    taskList += '\n[Orphaned subtasks (parent not in list)]\n';
+    orphanedTasks.forEach(t => {
+      const icon = t.status === 'completed' ? '✅' : '⚪';
+      taskList += `${icon} ${t.name} (ID: ${t.id}) [Parent: ${t.parentTaskId}]\n`;
+    });
+  }
+
   const result = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          tasks,
-          count: tasks.length,
-          filter: status || 'all'
-        }, null, 2)
+        text: `${completedCount}/${tasks.length} tasks done\n\n${taskList}`
       }
     ]
   };
@@ -235,16 +294,13 @@ export async function handleExecuteTask(
     throw new TaskExecutionError(validated.id, ERROR_MESSAGES.DEPENDENCY_NOT_MET);
   }
 
-  await service.save();
+  await service.forceSave();
 
   const result = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          message: 'Task executed successfully',
-          task
-        }, null, 2)
+        text: `✅ Task executed successfully\n\n**Name:** ${task.name}\n**ID:** ${task.id}\n**Status:** ${task.status}\n**Completed:** ${task.completedAt}`
       }
     ]
   };
@@ -271,16 +327,13 @@ export async function handleFailTask(
     throw new TaskNotFoundError(validated.id);
   }
 
-  await service.save();
+  await service.forceSave();
 
   const result = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          message: 'Task marked as failed',
-          task
-        }, null, 2)
+        text: `❌ Task marked as failed\n\n**Name:** ${task.name}\n**ID:** ${task.id}\n**Error:** ${task.error}\n**Failed At:** ${task.completedAt}`
       }
     ]
   };
@@ -307,16 +360,13 @@ export async function handleMarkInProgress(
     throw new TaskExecutionError(validated.id, ERROR_MESSAGES.DEPENDENCY_NOT_MET);
   }
 
-  await service.save();
+  await service.forceSave();
 
   const result = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          message: 'Task marked as in progress',
-          task
-        }, null, 2)
+        text: `🔄 Task marked as in progress\n\n**Name:** ${task.name}\n**ID:** ${task.id}\n**Started:** ${task.startedAt}`
       }
     ]
   };
@@ -343,16 +393,13 @@ export async function handleResetTask(
     throw new TaskNotFoundError(validated.id);
   }
 
-  await service.save();
+  await service.forceSave();
 
   const result = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          message: 'Task reset successfully',
-          task
-        }, null, 2)
+        text: `🔄 Task reset successfully\n\n**Name:** ${task.name}\n**ID:** ${task.id}\n**Status:** ${task.status}\n**Reset At:** ${task.updatedAt}`
       }
     ]
   };
@@ -379,16 +426,13 @@ export async function handleRetryTask(
     throw new TaskNotFoundError(validated.id);
   }
 
-  await service.save();
+  await service.forceSave();
 
   const result = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          message: 'Task retried successfully',
-          task
-        }, null, 2)
+        text: `🔄 Task retried successfully\n\n**Name:** ${task.name}\n**ID:** ${task.id}\n**Retry Count:** ${task.retries}/${task.maxRetries || '∞'}\n**Status:** ${task.status}`
       }
     ]
   };
@@ -412,10 +456,9 @@ export async function handleGetNextTasks(
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          tasks,
-          count: tasks.length
-        }, null, 2)
+        text: `📋 Ready to Execute - ${tasks.length} tasks\n\n${tasks.length > 0 
+          ? tasks.map(t => `- **${t.name}** (ID: ${t.id})`).join('\n')
+          : 'No tasks ready to execute'}`
       }
     ]
   };
@@ -442,10 +485,7 @@ export async function handleCanExecute(
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          taskId: validated.id,
-          ...check
-        }, null, 2)
+        text: `${check.canExecute ? '✅' : '❌'} Task ${check.canExecute ? 'can' : 'cannot'} be executed\n\n**Task ID:** ${validated.id}\n**Can Execute:** ${check.canExecute}\n${check.reason ? `**Reason:** ${check.reason}` : ''}`
       }
     ]
   };
@@ -466,20 +506,15 @@ export async function handleCreateWorkflow(
   // Validate input
   const validated = CreateWorkflowSchema.parse(args);
 
-  const workflowId = service.createWorkflow(validated.name, validated.taskIds);
+  const workflow = service.createWorkflow(validated.name, validated.taskIds);
   
-  await service.save();
+  await service.forceSave();
 
   const result = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          message: 'Workflow created successfully',
-          workflowId,
-          name: validated.name,
-          taskIds: validated.taskIds
-        }, null, 2)
+        text: `✅ Workflow created successfully\n\n**Name:** ${validated.name}\n**Workflow ID:** ${workflow.id}\n**Tasks:** ${validated.taskIds.length}\n**Task IDs:** ${validated.taskIds.join(', ')}`
       }
     ]
   };
@@ -500,28 +535,55 @@ export async function handleGetWorkflow(
   // Validate input
   const validated = WorkflowIdSchema.parse(args);
 
-  const taskIds = service.getWorkflow(validated);
+  const workflow = service.getWorkflow(validated);
   
-  if (!taskIds) {
+  if (!workflow) {
     throw new WorkflowNotFoundError(validated);
   }
 
-  const tasks = taskIds.map(taskId => service.getTask(taskId)).filter(Boolean);
+  const tasks = workflow.taskIds.map(taskId => service.getTask(taskId)).filter((t): t is Task => t !== undefined);
 
   const result = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          workflowId: validated,
-          taskIds,
-          tasks
-        }, null, 2)
+        text: `📋 Workflow Details\n\n**Workflow ID:** ${validated}\n**Name:** ${workflow.name}\n**Tasks:** ${workflow.taskIds.length}\n**Task IDs:** ${workflow.taskIds.join(', ')}\n\n${tasks.length > 0 
+          ? '**Tasks in workflow:\n' + tasks.map(t => `- **${t.name}** (${t.status})`).join('\n')
+          : 'No tasks found'}`
       }
     ]
   };
 
   await logger.logToolRequest('get_workflow', args, result);
+  return result;
+}
+
+/**
+ * Get subtasks handler
+ */
+export async function handleGetSubtasks(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  // Validate input
+  const validated = TaskIdSchema.parse(args);
+
+  const subtasks = service.getSubtasks(validated);
+
+  const result = {
+    content: [
+      {
+        type: 'text',
+        text: `📋 Subtasks for ${validated} - ${subtasks.length} subtasks\n\n${subtasks.length > 0 
+          ? subtasks.map(t => `- **${t.name}** (${t.status}) - ID: ${t.id}`).join('\n')
+          : 'No subtasks found'}`
+      }
+    ]
+  };
+
+  await logger.logToolRequest('get_subtasks', args, result);
   return result;
 }
 
@@ -540,10 +602,9 @@ export async function handleListWorkflows(
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          workflows,
-          count: Object.keys(workflows).length
-        }, null, 2)
+        text: `📋 All Workflows - ${Object.keys(workflows).length} workflows\n\n${Object.entries(workflows).map(([id, workflow]) => 
+          `- **Workflow ID:** ${id}\n  **Name:** ${(workflow as any).name}\n  **Tasks:** ${(workflow as any).taskIds.length}`
+        ).join('\n')}`
       }
     ]
   };
@@ -570,16 +631,13 @@ export async function handleDeleteWorkflow(
     throw new WorkflowNotFoundError(validated);
   }
 
-  await service.save();
+  await service.forceSave();
 
   const result = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          message: 'Workflow deleted successfully',
-          workflowId: validated
-        }, null, 2)
+        text: `✅ Workflow deleted successfully\n\n**Deleted Workflow ID:** ${validated}`
       }
     ]
   };
@@ -603,9 +661,7 @@ export async function handleGetStats(
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          stats
-        }, null, 2)
+        text: `📊 Task & Workflow Statistics\n\n**Total Tasks:** ${stats.totalTasks}\n**Pending:** ${stats.pending}\n**In Progress:** ${stats.inProgress}\n**Completed:** ${stats.completed}\n**Failed:** ${stats.failed}\n**Total Workflows:** ${stats.totalWorkflows}`
       }
     ]
   };
@@ -624,15 +680,13 @@ export async function handleClearAll(
   const { service, logger } = context;
 
   service.clearAll();
-  await service.save();
+  await service.forceSave();
 
   const result = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          message: 'All tasks and workflows cleared'
-        }, null, 2)
+        text: '🗑️ All tasks and workflows cleared'
       }
     ]
   };
@@ -656,14 +710,41 @@ export async function handleSaveState(
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          message: 'State saved successfully'
-        }, null, 2)
+        text: '💾 State saved successfully'
       }
     ]
   };
 
   await logger.logToolRequest('save_state', args, result);
+  return result;
+}
+
+/**
+ * Cleanup workflow runs handler
+ */
+export async function handleCleanupWorkflowRuns(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = CleanupWorkflowRunsSchema.parse(args);
+
+  const deletedCount = service.cleanupWorkflowRuns({
+    maxAgeMs: validated.maxAgeMs,
+    maxCount: validated.maxCount
+  });
+
+  const result = {
+    content: [
+      {
+        type: 'text',
+        text: `🧹 Cleaned up ${deletedCount} workflow run(s)\n\n**Max Age:** ${validated.maxAgeMs ? `${validated.maxAgeMs}ms` : 'N/A'}\n**Max Count:** ${validated.maxCount || 'N/A'}\n**Deleted:** ${deletedCount}`
+      }
+    ]
+  };
+
+  await logger.logToolRequest('cleanup_workflow_runs', args, result);
   return result;
 }
 
@@ -680,12 +761,7 @@ export async function handleGetVersion(
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          name: 'sequential',
-          version: '1.0.0',
-          description: 'Sequential task execution MCP server with dependency management and workflow support',
-          features: ['task_management', 'dependency_tracking', 'workflow_support', 'persistent_storage', 'execution_tracking', 'retry_logic', 'workflow_execution']
-        }, null, 2)
+        text: `🔧 Sequential MCP Server\n\n**Name:** sequential\n**Version:** 1.1.0\n**Description:** Sequential task execution MCP server with dependency management and workflow support\n**Features:** task_management, dependency_tracking, workflow_support, persistent_storage, execution_tracking, retry_logic, workflow_execution`
       }
     ]
   };
@@ -712,19 +788,13 @@ export async function handleStartWorkflowExecution(
     throw new WorkflowNotFoundError(validated.workflowId);
   }
 
-  await service.save();
+  await service.forceSave();
 
   const response = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          message: 'Workflow execution started',
-          runId: result.runId,
-          workflowId: validated.workflowId,
-          readyTasks: result.readyTasks,
-          readyTaskCount: result.readyTasks.length
-        }, null, 2)
+        text: `🚀 Workflow execution started\n\n**Run ID:** ${result.runId}\n**Workflow ID:** ${validated.workflowId}\n**Ready Tasks:** ${result.readyTasks.length}\n**Ready Task Names:** ${result.readyTasks.map(t => t.name).join(', ')}`
       }
     ]
   };
@@ -751,18 +821,13 @@ export async function handleAdvanceWorkflowRun(
     throw new WorkflowNotFoundError(validated.runId);
   }
 
-  await service.save();
+  await service.forceSave();
 
   const response = {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          message: 'Workflow run advanced',
-          run: result.run,
-          newReadyTasks: result.newReadyTasks,
-          newReadyTaskCount: result.newReadyTasks.length
-        }, null, 2)
+        text: `➡️ Workflow run advanced\n\n**Run ID:** ${result.run.id}\n**Status:** ${result.run.status}\n**Completed Tasks:** ${result.run.completedTaskIds.length}\n**Active Tasks:** ${result.run.activeTaskIds.length}\n**Blocked Tasks:** ${result.run.blockedTaskIds.length}\n**New Ready Tasks:** ${result.newReadyTasks.length}\n**New Ready Task Names:** ${result.newReadyTasks.map(t => t.name).join(', ')}`
       }
     ]
   };
@@ -793,9 +858,7 @@ export async function handleGetWorkflowRun(
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          run
-        }, null, 2)
+        text: `📋 Workflow Run Details\n\n**Run ID:** ${run.id}\n**Workflow ID:** ${run.workflowId}\n**Status:** ${run.status}\n**Completed Tasks:** ${run.completedTaskIds.length}\n**Active Tasks:** ${run.activeTaskIds.length}\n**Blocked Tasks:** ${run.blockedTaskIds.length}\n**Started:** ${run.startedAt}\n${run.completedAt ? `**Completed:** ${run.completedAt}` : ''}\n${run.error ? `**Error:** ${run.error}` : ''}`
       }
     ]
   };
@@ -819,10 +882,9 @@ export async function handleListWorkflowRuns(
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          runs,
-          count: runs.length
-        }, null, 2)
+        text: `📋 All Workflow Runs - ${runs.length} runs\n\n${runs.map(r => 
+          `- **Run ID:** ${r.id} (${r.status}) - Workflow: ${r.workflowId}`
+        ).join('\n')}`
       }
     ]
   };
@@ -849,11 +911,9 @@ export async function handleGetNextWorkflowTasks(
     content: [
       {
         type: 'text',
-        text: JSON.stringify({
-          workflowId: validated.workflowId,
-          tasks,
-          count: tasks.length
-        }, null, 2)
+        text: `📋 Ready Tasks in Workflow - ${tasks.length} tasks\n\n**Workflow ID:** ${validated.workflowId}\n**Ready Tasks:** ${tasks.length}\n**Ready Task Names:** ${tasks.map(t => t.name).join(', ')}\n\n${tasks.length > 0 
+          ? '**Tasks:\n' + tasks.map(t => `- **${t.name}** (ID: ${t.id})`).join('\n')
+          : 'No tasks ready to execute'}`
       }
     ]
   };
@@ -870,6 +930,7 @@ export const handlerRegistry: Record<string, (context: HandlerContext, args: Rec
   update_task: handleUpdateTask,
   delete_task: handleDeleteTask,
   get_task: handleGetTask,
+  get_subtasks: handleGetSubtasks,
   list_tasks: handleListTasks,
   execute_task: handleExecuteTask,
   fail_task: handleFailTask,
@@ -890,5 +951,6 @@ export const handlerRegistry: Record<string, (context: HandlerContext, args: Rec
   get_stats: handleGetStats,
   clear_all: handleClearAll,
   save_state: handleSaveState,
-  get_version: handleGetVersion
+  get_version: handleGetVersion,
+  cleanup_workflow_runs: handleCleanupWorkflowRuns
 };

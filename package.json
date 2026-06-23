@@ -8,7 +8,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
-    "test": "node --test"
+    "test": "tsc --project tsconfig.test.json && node --test dist/test/sequentialService.test.js"
   },
   "keywords": [
     "mcp",

@@ -55,7 +55,7 @@ class SequentialMCPServer {
         tools: [
           {
             name: 'create_task',
-            description: 'Create a new task with optional dependencies',
+            description: 'Create a new task with optional dependencies and parent task',
             inputSchema: {
               type: 'object',
               properties: {
@@ -73,6 +73,10 @@ class SequentialMCPServer {
                     type: 'string'
                   },
                   description: 'Array of task IDs that this task depends on'
+                },
+                parentTaskId: {
+                  type: 'string',
+                  description: 'Optional parent task ID for creating subtasks'
                 },
                 metadata: {
                   type: 'object',
@@ -111,6 +115,10 @@ class SequentialMCPServer {
                   },
                   description: 'New dependencies for the task'
                 },
+                parentTaskId: {
+                  type: 'string',
+                  description: 'New parent task ID for the task'
+                },
                 metadata: {
                   type: 'object',
                   description: 'New metadata for the task'
@@ -142,6 +150,20 @@ class SequentialMCPServer {
                 id: {
                   type: 'string',
                   description: 'The ID of the task to retrieve'
+                }
+              },
+              required: ['id']
+            }
+          },
+          {
+            name: 'get_subtasks',
+            description: 'Get all subtasks of a parent task',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                id: {
+                  type: 'string',
+                  description: 'The parent task ID to get subtasks for'
                 }
               },
               required: ['id']
@@ -412,6 +434,23 @@ class SequentialMCPServer {
             inputSchema: {
               type: 'object',
               properties: {}
+            }
+          },
+          {
+            name: 'cleanup_workflow_runs',
+            description: 'Clean up old workflow runs based on age or count',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                maxAgeMs: {
+                  type: 'number',
+                  description: 'Maximum age in milliseconds for workflow runs to keep (optional)'
+                },
+                maxCount: {
+                  type: 'number',
+                  description: 'Maximum number of workflow runs to keep (optional, keeps most recent)'
+                }
+              }
             }
           }
         ]

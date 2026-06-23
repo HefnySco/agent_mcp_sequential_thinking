@@ -7,7 +7,9 @@ import type {
   CreateTaskInput,
   UpdateTaskInput,
   TaskExecutionResult,
-  TaskStats
+  TaskStats,
+  WorkflowRun,
+  Workflow
 } from './types.js';
 import {
   StorageError,
@@ -15,13 +17,16 @@ import {
   DependencyNotFoundError
 } from './errors.js';
 import { TASK_STATUS } from './constants.js';
-
+import { getConfigManager } from './config.js';
 /**
  * SequentialService manages task execution with dependency tracking
  */
 export class SequentialService {
   private storagePath: string;
   private state: SequentialState;
+  private saveTimeout: NodeJS.Timeout | null = null;
+  private autoSave: boolean;
+  private saveDebounceMs: number;
 
   /**
    * Create a new SequentialService instance
@@ -34,6 +39,10 @@ export class SequentialService {
       workflows: new Map(),
       workflowRuns: new Map()
     };
+    
+    const config = getConfigManager();
+    this.autoSave = config.isAutoSaveEnabled();
+    this.saveDebounceMs = config.getSaveDebounceMs();
   }
 
   /**
@@ -50,11 +59,24 @@ export class SequentialService {
       );
       
       this.state.workflows = new Map(
-        Object.entries(parsed.workflows || {}).map(([id, tasks]: [string, unknown]) => [id, tasks as string[]])
+        Object.entries(parsed.workflows || {}).map(([id, workflow]: [string, unknown]) => {
+          // Handle both old format (string[]) and new format (Workflow)
+          if (Array.isArray(workflow)) {
+            // Old format - migrate to new format
+            return [id, {
+              id,
+              name: 'Migrated Workflow',
+              taskIds: workflow as string[],
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            } as Workflow];
+          }
+          return [id, workflow as Workflow];
+        })
       );
       
       this.state.workflowRuns = new Map(
-        Object.entries(parsed.workflowRuns || {}).map(([id, run]: [string, unknown]) => [id, run as any])
+        Object.entries(parsed.workflowRuns || {}).map(([id, run]: [string, unknown]) => [id, run as WorkflowRun])
       );
     } catch (err) {
       // File doesn't exist or is empty, start with empty state
@@ -87,21 +109,76 @@ export class SequentialService {
   }
 
   /**
+   * Trigger debounced save if auto-save is enabled
+   */
+  private triggerSave(): void {
+    if (!this.autoSave) {
+      return;
+    }
+
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+    }
+
+    this.saveTimeout = setTimeout(async () => {
+      try {
+        await this.save();
+      } catch (err) {
+        console.error('Auto-save failed:', err);
+      }
+    }, this.saveDebounceMs);
+  }
+
+  /**
+   * Force immediate save (bypasses debouncing)
+   */
+  async forceSave(): Promise<void> {
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+      this.saveTimeout = null;
+    }
+    await this.save();
+  }
+
+  /**
    * Create a new task
    * @param task - Task creation input
    * @returns The created task
+   * @throws DependencyNotFoundError if a dependency task doesn't exist
+   * @throws Error if circular dependency is detected
    */
   createTask(task: CreateTaskInput): Task {
     const id = this.generateId();
     const now = new Date().toISOString();
+    
+    // Validate dependencies exist
+    if (task.dependencies) {
+      for (const depId of task.dependencies) {
+        if (!this.state.tasks.has(depId)) {
+          throw new DependencyNotFoundError(depId);
+        }
+      }
+    }
+    
+    // Validate parent task exists
+    if (task.parentTaskId && !this.state.tasks.has(task.parentTaskId)) {
+      throw new TaskNotFoundError(task.parentTaskId);
+    }
+    
+    // Check for circular dependencies
+    if (task.dependencies && task.dependencies.length > 0) {
+      this.checkCircularDependency(id, task.dependencies);
+    }
     
     const newTask: Task = {
       id,
       name: task.name,
       description: task.description,
       dependencies: task.dependencies || [],
+      parentTaskId: task.parentTaskId,
       metadata: task.metadata,
       maxRetries: task.maxRetries,
+      timeoutMs: task.timeoutMs,
       retries: 0,
       status: TASK_STATUS.PENDING,
       createdAt: now,
@@ -109,7 +186,66 @@ export class SequentialService {
     };
     
     this.state.tasks.set(id, newTask);
+    this.triggerSave();
     return newTask;
+  }
+
+  /**
+   * Check for circular dependencies in task graph
+   * @param taskId - The new task ID being created
+   * @param dependencies - Dependencies of the new task
+   * @throws Error if circular dependency is detected
+   */
+  private checkCircularDependency(taskId: string, dependencies: string[]): void {
+    const visited = new Set<string>();
+    const recursionStack = new Set<string>();
+    const now = new Date().toISOString();
+
+    const hasCycle = (currentId: string): boolean => {
+      visited.add(currentId);
+      recursionStack.add(currentId);
+
+      const task = this.state.tasks.get(currentId);
+      if (task) {
+        for (const depId of task.dependencies) {
+          if (!visited.has(depId)) {
+            if (hasCycle(depId)) {
+              return true;
+            }
+          } else if (recursionStack.has(depId)) {
+            return true;
+          }
+        }
+      }
+
+      recursionStack.delete(currentId);
+      return false;
+    };
+
+    // Check if any dependency would create a cycle back to the new task
+    for (const depId of dependencies) {
+      visited.clear();
+      recursionStack.clear();
+      
+      // Temporarily add the new task to check for cycles
+      this.state.tasks.set(taskId, {
+        id: taskId,
+        name: 'temp',
+        status: TASK_STATUS.PENDING,
+        dependencies: [],
+        createdAt: now,
+        updatedAt: now
+      } as Task);
+      
+      const hasCycleFromDep = hasCycle(depId);
+      
+      // Remove the temporary task
+      this.state.tasks.delete(taskId);
+      
+      if (hasCycleFromDep) {
+        throw new Error(`Circular dependency detected: task ${taskId} depends on ${depId}, which would create a cycle`);
+      }
+    }
   }
 
   /**
@@ -130,6 +266,7 @@ export class SequentialService {
     };
     
     this.state.tasks.set(id, updatedTask);
+    this.triggerSave();
     return updatedTask;
   }
 
@@ -139,7 +276,11 @@ export class SequentialService {
    * @returns True if task was deleted, false if not found
    */
   deleteTask(id: string): boolean {
-    return this.state.tasks.delete(id);
+    const deleted = this.state.tasks.delete(id);
+    if (deleted) {
+      this.triggerSave();
+    }
+    return deleted;
   }
 
   /**
@@ -172,28 +313,39 @@ export class SequentialService {
    * Create a workflow
    * @param name - Workflow name
    * @param taskIds - Array of task IDs in the workflow
-   * @returns The workflow ID
+   * @returns The created workflow
    */
-  createWorkflow(name: string, taskIds: string[]): string {
+  createWorkflow(name: string, taskIds: string[]): Workflow {
     const workflowId = this.generateId();
-    this.state.workflows.set(workflowId, taskIds);
-    return workflowId;
+    const now = new Date().toISOString();
+    
+    const workflow: Workflow = {
+      id: workflowId,
+      name,
+      taskIds,
+      createdAt: now,
+      updatedAt: now
+    };
+    
+    this.state.workflows.set(workflowId, workflow);
+    this.triggerSave();
+    return workflow;
   }
 
   /**
    * Get a workflow by ID
    * @param id - Workflow ID
-   * @returns Array of task IDs or undefined if not found
+   * @returns Workflow or undefined if not found
    */
-  getWorkflow(id: string): string[] | undefined {
+  getWorkflow(id: string): Workflow | undefined {
     return this.state.workflows.get(id);
   }
 
   /**
    * Get all workflows
-   * @returns Object mapping workflow IDs to task ID arrays
+   * @returns Object mapping workflow IDs to workflow objects
    */
-  getAllWorkflows(): Record<string, string[]> {
+  getAllWorkflows(): Record<string, Workflow> {
     return Object.fromEntries(this.state.workflows);
   }
 
@@ -203,7 +355,11 @@ export class SequentialService {
    * @returns True if workflow was deleted, false if not found
    */
   deleteWorkflow(id: string): boolean {
-    return this.state.workflows.delete(id);
+    const deleted = this.state.workflows.delete(id);
+    if (deleted) {
+      this.triggerSave();
+    }
+    return deleted;
   }
 
   /**
@@ -350,6 +506,7 @@ export class SequentialService {
     this.state.tasks.clear();
     this.state.workflows.clear();
     this.state.workflowRuns.clear();
+    this.triggerSave();
   }
 
   /**
@@ -440,7 +597,7 @@ export class SequentialService {
     const readyTasks: Task[] = [];
     const blockedTaskIds: string[] = [];
 
-    for (const taskId of workflow) {
+    for (const taskId of workflow.taskIds) {
       const task = this.state.tasks.get(taskId);
       if (!task) {
         blockedTaskIds.push(taskId);
@@ -476,7 +633,7 @@ export class SequentialService {
    * @param runId - Workflow run ID
    * @returns Object with updated run and newly ready tasks, or null if not found
    */
-  advanceWorkflowRun(runId: string): { run: any; newReadyTasks: Task[] } | null {
+  advanceWorkflowRun(runId: string): { run: WorkflowRun; newReadyTasks: Task[] } | null {
     const run = this.state.workflowRuns.get(runId);
     if (!run) return null;
 
@@ -508,6 +665,17 @@ export class SequentialService {
         };
         this.state.workflowRuns.set(runId, updatedRun);
         return { run: updatedRun, newReadyTasks: [] };
+      } else if (task && task.status === TASK_STATUS.IN_PROGRESS && task.timeoutMs && task.startedAt) {
+        // Check if task has exceeded its timeout
+        const startedTime = new Date(task.startedAt).getTime();
+        const currentTime = Date.now();
+        const elapsed = currentTime - startedTime;
+        
+        if (elapsed > task.timeoutMs) {
+          // Task has timed out - fail it
+          this.failTask(activeTaskId, `Task timed out after ${elapsed}ms (timeout: ${task.timeoutMs}ms)`);
+          newlyCompleted.push(activeTaskId);
+        }
       }
     }
 
@@ -519,7 +687,7 @@ export class SequentialService {
     const newReadyTasks: Task[] = [];
     const newBlockedTaskIds: string[] = [];
 
-    for (const taskId of workflow) {
+    for (const taskId of workflow.taskIds) {
       // Skip if already completed or active
       if (updatedCompleted.includes(taskId) || updatedActive.includes(taskId)) {
         continue;
@@ -546,7 +714,7 @@ export class SequentialService {
     const updatedBlockedTaskIds = [...run.blockedTaskIds.filter(id => !newReadyTasks.map(t => t.id).includes(id)), ...newBlockedTaskIds];
 
     // Check if workflow is complete
-    const allTasksCompleted = workflow.every(taskId => updatedCompleted.includes(taskId));
+    const allTasksCompleted = workflow.taskIds.every((taskId: string) => updatedCompleted.includes(taskId));
     const workflowStatus = allTasksCompleted ? 'completed' as const : 'in_progress' as const;
 
     const updatedRun = {
@@ -567,7 +735,7 @@ export class SequentialService {
    * @param runId - Workflow run ID
    * @returns Workflow run or undefined
    */
-  getWorkflowRun(runId: string): any | undefined {
+  getWorkflowRun(runId: string): WorkflowRun | undefined {
     return this.state.workflowRuns.get(runId);
   }
 
@@ -575,8 +743,83 @@ export class SequentialService {
    * Get all workflow runs
    * @returns Array of all workflow runs
    */
-  getAllWorkflowRuns(): any[] {
+  getAllWorkflowRuns(): WorkflowRun[] {
     return Array.from(this.state.workflowRuns.values());
+  }
+
+  /**
+   * Delete old workflow runs based on age or count
+   * @param options - Cleanup options
+   * @returns Number of deleted runs
+   */
+  cleanupWorkflowRuns(options: { maxAgeMs?: number; maxCount?: number }): number {
+    const now = Date.now();
+    let deletedCount = 0;
+
+    for (const [runId, run] of this.state.workflowRuns) {
+      let shouldDelete = false;
+
+      // Check age-based cleanup
+      if (options.maxAgeMs && run.startedAt) {
+        const startedTime = new Date(run.startedAt).getTime();
+        const age = now - startedTime;
+        if (age > options.maxAgeMs) {
+          shouldDelete = true;
+        }
+      }
+
+      // Check count-based cleanup (keep only the most recent runs)
+      if (options.maxCount && !shouldDelete) {
+        const allRuns = Array.from(this.state.workflowRuns.values())
+          .sort((a, b) => {
+            const timeA = a.startedAt ? new Date(a.startedAt).getTime() : 0;
+            const timeB = b.startedAt ? new Date(b.startedAt).getTime() : 0;
+            return timeB - timeA; // Sort by newest first
+          });
+        
+        const runIndex = allRuns.findIndex(r => r.id === run.id);
+        if (runIndex >= options.maxCount) {
+          shouldDelete = true;
+        }
+      }
+
+      if (shouldDelete) {
+        this.state.workflowRuns.delete(runId);
+        deletedCount++;
+      }
+    }
+
+    if (deletedCount > 0) {
+      this.triggerSave();
+    }
+
+    return deletedCount;
+  }
+
+  /**
+   * Get all subtasks of a parent task
+   * @param parentTaskId - The parent task ID
+   * @returns Array of subtasks
+   */
+  getSubtasks(parentTaskId: string): Task[] {
+    return Array.from(this.state.tasks.values()).filter(
+      task => task.parentTaskId === parentTaskId
+    );
+  }
+
+  /**
+   * Get a task with its direct subtasks
+   * @param taskId - The task ID
+   * @returns Object containing the task and its subtasks
+   * @throws TaskNotFoundError if task doesn't exist
+   */
+  getTaskWithSubtasks(taskId: string): { task: Task; subtasks: Task[] } {
+    const task = this.getTask(taskId);
+    if (!task) {
+      throw new TaskNotFoundError(taskId);
+    }
+    const subtasks = this.getSubtasks(taskId);
+    return { task, subtasks };
   }
 
   /**
@@ -590,7 +833,7 @@ export class SequentialService {
 
     const readyTasks: Task[] = [];
 
-    for (const taskId of workflow) {
+    for (const taskId of workflow.taskIds) {
       const task = this.state.tasks.get(taskId);
       if (!task) continue;
 

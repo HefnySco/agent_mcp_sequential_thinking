@@ -62,6 +62,25 @@ describe('SequentialService', () => {
 
       assert.notStrictEqual(task1.id, task2.id);
     });
+
+    it('should create a task with a parent task', () => {
+      const parentTask = service.createTask({ name: 'Parent Task' });
+      const childTask = service.createTask({
+        name: 'Child Task',
+        parentTaskId: parentTask.id
+      });
+
+      assert.strictEqual(childTask.parentTaskId, parentTask.id);
+    });
+
+    it('should throw error when parent task does not exist', () => {
+      assert.throws(() => {
+        service.createTask({
+          name: 'Child Task',
+          parentTaskId: 'non-existent-parent-id'
+        });
+      });
+    });
   });
 
   describe('updateTask', () => {
@@ -298,12 +317,12 @@ describe('SequentialService', () => {
       const task1 = service.createTask({ name: 'Task 1' });
       const task2 = service.createTask({ name: 'Task 2' });
 
-      const workflowId = service.createWorkflow('Test Workflow', [task1.id, task2.id]);
-      assert.ok(workflowId);
-
-      const workflow = service.getWorkflow(workflowId);
+      const workflow = service.createWorkflow('Test Workflow', [task1.id, task2.id]);
       assert.ok(workflow);
-      assert.strictEqual(workflow?.length, 2);
+
+      const retrievedWorkflow = service.getWorkflow(workflow.id);
+      assert.ok(retrievedWorkflow);
+      assert.strictEqual(retrievedWorkflow?.taskIds.length, 2);
     });
 
     it('should get all workflows', () => {
@@ -319,13 +338,13 @@ describe('SequentialService', () => {
 
     it('should delete a workflow', () => {
       const task1 = service.createTask({ name: 'Task 1' });
-      const workflowId = service.createWorkflow('Test Workflow', [task1.id]);
+      const workflow = service.createWorkflow('Test Workflow', [task1.id]);
 
-      const deleted = service.deleteWorkflow(workflowId);
+      const deleted = service.deleteWorkflow(workflow.id);
       assert.strictEqual(deleted, true);
 
-      const workflow = service.getWorkflow(workflowId);
-      assert.strictEqual(workflow, undefined);
+      const retrievedWorkflow = service.getWorkflow(workflow.id);
+      assert.strictEqual(retrievedWorkflow, undefined);
     });
   });
 
@@ -369,6 +388,45 @@ describe('SequentialService', () => {
       assert.ok(loadedTask);
       assert.strictEqual(loadedTask?.name, 'Test Task');
       assert.strictEqual(loadedTask?.id, task.id);
+    });
+  });
+
+  describe('subtasks', () => {
+    it('should get subtasks of a parent task', () => {
+      const parentTask = service.createTask({ name: 'Parent Task' });
+      const child1 = service.createTask({ name: 'Child 1', parentTaskId: parentTask.id });
+      const child2 = service.createTask({ name: 'Child 2', parentTaskId: parentTask.id });
+      const unrelatedTask = service.createTask({ name: 'Unrelated Task' });
+
+      const subtasks = service.getSubtasks(parentTask.id);
+      assert.strictEqual(subtasks.length, 2);
+      assert.ok(subtasks.some(t => t.id === child1.id));
+      assert.ok(subtasks.some(t => t.id === child2.id));
+      assert.ok(!subtasks.some(t => t.id === unrelatedTask.id));
+    });
+
+    it('should return empty array for task with no subtasks', () => {
+      const task = service.createTask({ name: 'Task with no children' });
+      const subtasks = service.getSubtasks(task.id);
+      assert.strictEqual(subtasks.length, 0);
+    });
+
+    it('should get task with its subtasks', () => {
+      const parentTask = service.createTask({ name: 'Parent Task' });
+      const child1 = service.createTask({ name: 'Child 1', parentTaskId: parentTask.id });
+      const child2 = service.createTask({ name: 'Child 2', parentTaskId: parentTask.id });
+
+      const result = service.getTaskWithSubtasks(parentTask.id);
+      assert.strictEqual(result.task.id, parentTask.id);
+      assert.strictEqual(result.subtasks.length, 2);
+      assert.ok(result.subtasks.some(t => t.id === child1.id));
+      assert.ok(result.subtasks.some(t => t.id === child2.id));
+    });
+
+    it('should throw error when getting subtasks of non-existent task', () => {
+      assert.throws(() => {
+        service.getTaskWithSubtasks('non-existent-id');
+      });
     });
   });
 });

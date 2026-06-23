@@ -44,7 +44,7 @@ export const ERROR_MESSAGES = {
  */
 export const SERVER_CONFIG = {
   NAME: 'sequential',
-  VERSION: '1.0.0',
+  VERSION: '1.1.0',
   DESCRIPTION: 'Sequential task execution MCP server with dependency management and workflow support'
 } as const;
 

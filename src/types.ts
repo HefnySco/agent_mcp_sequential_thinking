@@ -12,12 +12,14 @@ export interface Task {
   description?: string;
   status: TaskStatus;
   dependencies: string[];
+  parentTaskId?: string;
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
   completedAt?: string;
   retries?: number;
   maxRetries?: number;
+  timeoutMs?: number;
   result?: unknown;
   error?: string;
   metadata?: Record<string, unknown>;
@@ -30,8 +32,10 @@ export interface CreateTaskInput {
   name: string;
   description?: string;
   dependencies?: string[];
+  parentTaskId?: string;
   metadata?: Record<string, unknown>;
   maxRetries?: number;
+  timeoutMs?: number;
 }
 
 /**
@@ -42,12 +46,14 @@ export interface UpdateTaskInput {
   description?: string;
   status?: TaskStatus;
   dependencies?: string[];
+  parentTaskId?: string;
   metadata?: Record<string, unknown>;
   result?: unknown;
   error?: string;
   startedAt?: string;
   completedAt?: string;
   retries?: number;
+  timeoutMs?: number;
   updatedAt?: string;
 }
 
@@ -74,11 +80,22 @@ export interface WorkflowRun {
 }
 
 /**
+ * Workflow interface representing a workflow definition
+ */
+export interface Workflow {
+  id: string;
+  name: string;
+  taskIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
  * Sequential state structure
  */
 export interface SequentialState {
   tasks: Map<string, Task>;
-  workflows: Map<string, string[]>;
+  workflows: Map<string, Workflow>;
   workflowRuns: Map<string, WorkflowRun>;
 }
 

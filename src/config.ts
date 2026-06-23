@@ -8,7 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 
 /**
- * Configuration manager for Sequential MCP server
+ * Configuration manager for Task Orchestrator MCP server
  */
 export class ConfigManager {
   private config: SequentialConfig;
@@ -21,19 +21,19 @@ export class ConfigManager {
    * Load configuration from environment variables with defaults
    */
   private loadConfig(): SequentialConfig {
-    const storagePath = process.env.SEQUENTIAL_STORAGE_PATH || 
+    const storagePath = process.env.TASK_ORCHESTRATOR_STORAGE_PATH || 
       path.join(PROJECT_ROOT, FILE_CONFIG.DEFAULT_STORAGE_FILENAME);
     
-    const outputDir = process.env.SEQUENTIAL_OUTPUT_DIR || 
+    const outputDir = process.env.TASK_ORCHESTRATOR_OUTPUT_DIR || 
       path.join(PROJECT_ROOT, FILE_CONFIG.DEFAULT_OUTPUT_DIR);
     
-    const autoSave = process.env.SEQUENTIAL_AUTO_SAVE !== 'false';
+    const autoSave = process.env.TASK_ORCHESTRATOR_AUTO_SAVE !== 'false';
     
-    const saveDebounceMs = parseInt(process.env.SEQUENTIAL_SAVE_DEBOUNCE_MS || '1000', 10);
+    const saveDebounceMs = parseInt(process.env.TASK_ORCHESTRATOR_SAVE_DEBOUNCE_MS || '1000', 10);
 
     // Validate configuration
     if (isNaN(saveDebounceMs) || saveDebounceMs < 0) {
-      throw new ConfigurationError('SEQUENTIAL_SAVE_DEBOUNCE_MS must be a positive number');
+      throw new ConfigurationError('TASK_ORCHESTRATOR_SAVE_DEBOUNCE_MS must be a positive number');
     }
 
     return {

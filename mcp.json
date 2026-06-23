@@ -1,11 +1,11 @@
 {
   "mcpServers": {
-    "sequential": {
+    "task-orchestrator": {
       "command": "node",
-      "args": ["/home/mhefny/code/mcp/sequential-mcp/dist/index.js"],
+      "args": ["/home/mhefny/code/mcp/task-orchestrator-mcp/dist/index.js"],
       "env": {
-        "SEQUENTIAL_STORAGE_PATH": "/home/mhefny/code/mcp/sequential-mcp/sequential-storage.json",
-        "SEQUENTIAL_OUTPUT_DIR": "/home/mhefny/code/mcp/sequential-mcp/output"
+        "TASK_ORCHESTRATOR_STORAGE_PATH": "/home/mhefny/code/mcp/task-orchestrator-mcp/task-orchestrator-storage.json",
+        "TASK_ORCHESTRATOR_OUTPUT_DIR": "/home/mhefny/code/mcp/task-orchestrator-mcp/output"
       }
     }
   }

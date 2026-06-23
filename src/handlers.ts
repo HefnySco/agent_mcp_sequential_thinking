@@ -1,4 +1,4 @@
-import { SequentialService } from './sequentialService.js';
+import { TaskOrchestratorService } from './taskOrchestratorService.js';
 import { getLogger } from './logger.js';
 import { 
   ValidationError, 
@@ -32,7 +32,7 @@ import { ERROR_MESSAGES } from './constants.js';
  * Tool handler context
  */
 interface HandlerContext {
-  service: SequentialService;
+  service: TaskOrchestratorService;
   logger: ReturnType<typeof getLogger>;
 }
 

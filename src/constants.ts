@@ -43,18 +43,18 @@ export const ERROR_MESSAGES = {
  * Server configuration constants
  */
 export const SERVER_CONFIG = {
-  NAME: 'sequential',
+  NAME: 'task-orchestrator',
   VERSION: '1.1.0',
-  DESCRIPTION: 'Sequential task execution MCP server with dependency management and workflow support'
+  DESCRIPTION: 'Task orchestration MCP server with dependency management and workflow support'
 } as const;
 
 /**
  * File operation constants
  */
 export const FILE_CONFIG = {
-  DEFAULT_STORAGE_FILENAME: 'sequential-storage.json',
+  DEFAULT_STORAGE_FILENAME: 'task-orchestrator-storage.json',
   DEFAULT_OUTPUT_DIR: 'output',
-  LOG_FILE_PREFIX: 'sequential-log-',
+  LOG_FILE_PREFIX: 'task-orchestrator-log-',
   LOG_FILE_EXTENSION: '.json'
 } as const;
 

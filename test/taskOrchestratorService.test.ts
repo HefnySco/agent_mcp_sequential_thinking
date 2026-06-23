@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
-import { SequentialService } from '../src/sequentialService.js';
+import { TaskOrchestratorService } from '../src/taskOrchestratorService.js';
 import { resetConfigManager } from '../src/config.js';
 import { TASK_STATUS } from '../src/constants.js';
 import type { Task } from '../src/types.js';
@@ -11,12 +11,12 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_STORAGE_PATH = path.join(__dirname, 'test-storage.json');
 
-describe('SequentialService', () => {
-  let service: SequentialService;
+describe('TaskOrchestratorService', () => {
+  let service: TaskOrchestratorService;
 
   beforeEach(async () => {
     resetConfigManager();
-    service = new SequentialService(TEST_STORAGE_PATH);
+    service = new TaskOrchestratorService(TEST_STORAGE_PATH);
     await service.load();
   });
 
@@ -592,7 +592,7 @@ describe('SequentialService', () => {
       const task = service.createTask({ name: 'Test Task' });
       await service.save();
 
-      const newService = new SequentialService(TEST_STORAGE_PATH);
+      const newService = new TaskOrchestratorService(TEST_STORAGE_PATH);
       await newService.load();
 
       const loadedTask = newService.getTask(task.id);

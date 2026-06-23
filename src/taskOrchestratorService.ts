@@ -20,9 +20,9 @@ import {
 import { TASK_STATUS } from './constants.js';
 import { getConfigManager } from './config.js';
 /**
- * SequentialService manages task execution with dependency tracking
+ * TaskOrchestratorService manages task execution with dependency tracking
  */
-export class SequentialService {
+export class TaskOrchestratorService {
   private storagePath: string;
   private state: SequentialState;
   private saveTimeout: NodeJS.Timeout | null = null;
@@ -30,7 +30,7 @@ export class SequentialService {
   private saveDebounceMs: number;
 
   /**
-   * Create a new SequentialService instance
+   * Create a new TaskOrchestratorService instance
    * @param storagePath - Path to the storage file
    */
   constructor(storagePath: string) {

@@ -6,7 +6,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { SequentialService } from './sequentialService.js';
+import { TaskOrchestratorService } from './taskOrchestratorService.js';
 import { getConfigManager } from './config.js';
 import { getLogger } from './logger.js';
 import { handlerRegistry } from './handlers.js';
@@ -15,11 +15,11 @@ import { ZodError } from 'zod';
 import { SequentialError } from './errors.js';
 
 /**
- * Sequential MCP Server - Main server class
+ * Task Orchestrator MCP Server - Main server class
  */
-class SequentialMCPServer {
+class TaskOrchestratorMCPServer {
   private server: Server;
-  private sequentialService: SequentialService;
+  private taskOrchestratorService: TaskOrchestratorService;
   private logger: ReturnType<typeof getLogger>;
 
   constructor() {
@@ -38,9 +38,9 @@ class SequentialMCPServer {
       }
     );
 
-    this.sequentialService = new SequentialService(config.getStoragePath());
-    this.sequentialService.load().catch(err => {
-      this.logger.error('Failed to load sequential service state', { error: err });
+    this.taskOrchestratorService = new TaskOrchestratorService(config.getStoragePath());
+    this.taskOrchestratorService.load().catch(err => {
+      this.logger.error('Failed to load task orchestrator service state', { error: err });
     });
     
     this.setupHandlers();
@@ -487,7 +487,7 @@ class SequentialMCPServer {
 
       try {
         const context = {
-          service: this.sequentialService,
+          service: this.taskOrchestratorService,
           logger: this.logger
         };
         return await handler(context, args || {});
@@ -542,9 +542,9 @@ class SequentialMCPServer {
   async run() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    this.logger.info('Sequential MCP server running on stdio');
+    this.logger.info('Task Orchestrator MCP server running on stdio');
   }
 }
 
-const server = new SequentialMCPServer();
+const server = new TaskOrchestratorMCPServer();
 server.run().catch(console.error);

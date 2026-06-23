@@ -1,8 +1,8 @@
-# ⚡ Sequential MCP Server
+# ⚡ Task Orchestrator MCP Server
 
-**Sequential MCP** is a task orchestration server that helps AI agents execute complex workflows with proper dependency management. Think of it as a smart task scheduler—define your tasks, set up dependencies between them, and let the system handle execution order, retries, and progress tracking. Perfect for CI/CD pipelines, multi-step processes, and any workflow that needs tasks to run in the right sequence.
+**Task Orchestrator MCP** is a task orchestration server that helps AI agents execute complex workflows with proper dependency management. Think of it as a smart task scheduler—define your tasks, set up dependencies between them, and let the system handle execution order, retries, and progress tracking. Perfect for CI/CD pipelines, multi-step processes, and any workflow that needs tasks to run in the right sequence.
 
-Whether you're building deployment pipelines, running test suites, or coordinating multi-stage processes, Sequential MCP provides structured task execution with automatic dependency resolution, retry logic, and persistent storage for tracking progress over time.
+Whether you're building deployment pipelines, running test suites, or coordinating multi-stage processes, Task Orchestrator MCP provides structured task execution with automatic dependency resolution, retry logic, and persistent storage for tracking progress over time.
 
 ## ✨ Features
 
@@ -30,20 +30,20 @@ The MCP server is configured via environment variables in `mcp.json`:
 ```json
 {
   "mcpServers": {
-    "sequential": {
+    "task-orchestrator": {
       "command": "node",
-      "args": ["/path/to/sequential-mcp/dist/index.js"],
+      "args": ["/path/to/task-orchestrator-mcp/dist/index.js"],
       "env": {
-        "SEQUENTIAL_STORAGE_PATH": "/path/to/sequential-mcp/sequential-storage.json",
-        "SEQUENTIAL_OUTPUT_DIR": "/path/to/sequential-mcp/output"
+        "TASK_ORCHESTRATOR_STORAGE_PATH": "/path/to/task-orchestrator-mcp/task-orchestrator-storage.json",
+        "TASK_ORCHESTRATOR_OUTPUT_DIR": "/path/to/task-orchestrator-mcp/output"
       }
     }
   }
 }
 ```
 
-- `SEQUENTIAL_STORAGE_PATH`: Path to the JSON file where tasks and workflows are stored
-- `SEQUENTIAL_OUTPUT_DIR`: Directory where activity logs are stored
+- `TASK_ORCHESTRATOR_STORAGE_PATH`: Path to the JSON file where tasks and workflows are stored
+- `TASK_ORCHESTRATOR_OUTPUT_DIR`: Directory where activity logs are stored
 
 ## 🎯 Quick Start
 
@@ -232,7 +232,7 @@ Clear all tasks and workflows.
 Manually save the current state to storage.
 
 ### `get_version`
-Get the version information of this sequential MCP server.
+Get the version information of this task orchestrator MCP server.
 
 ## 📖 Usage Example
 
@@ -282,7 +282,7 @@ Get the version information of this sequential MCP server.
 
 ### Dependency-Aware Workflow Orchestration
 
-The sequential-mcp supports true dependency-aware workflow execution that respects the full task dependency graph (not just linear execution). This enables parallel execution of independent tasks within a workflow.
+The task-orchestrator-mcp supports true dependency-aware workflow execution that respects the full task dependency graph (not just linear execution). This enables parallel execution of independent tasks within a workflow.
 
 #### Key Benefits
 
@@ -300,8 +300,8 @@ All tool calls are automatically logged to the output directory specified by `SE
 
 ```
 output/
-├── sequential-log-2024-06-22.json
-├── sequential-log-2024-06-23.json
+├── task-orchestrator-log-2024-06-22.json
+├── task-orchestrator-log-2024-06-23.json
 └── ...
 ```
 

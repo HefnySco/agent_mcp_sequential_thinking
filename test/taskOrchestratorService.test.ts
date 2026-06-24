@@ -25,6 +25,8 @@ for (const testCase of testCases) {
 
     beforeEach(async () => {
       resetConfigManager();
+      // Disable auto-save during tests to avoid race conditions with cleanup
+      process.env.TASK_ORCHESTRATOR_AUTO_SAVE = 'false';
       storageAdapter = StorageFactory.createAdapter(testCase.backend, testCase.path);
       await storageAdapter.initialize();
       service = new TaskOrchestratorService(storageAdapter);
@@ -32,6 +34,7 @@ for (const testCase of testCases) {
     });
 
     afterEach(async () => {
+      await service.forceSave(); // Ensure all pending saves complete
       await service.shutdown();
       await service.clearAll();
       await storageAdapter.close();

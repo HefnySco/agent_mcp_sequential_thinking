@@ -114,6 +114,12 @@ export class TaskOrchestratorService {
       clearTimeout(this.saveTimeout);
       this.saveTimeout = null;
     }
+    // Do a final save to ensure data is persisted before shutdown
+    try {
+      await this.save();
+    } catch {
+      // Ignore save errors during shutdown (DB might already be closed)
+    }
   }
 
   /**

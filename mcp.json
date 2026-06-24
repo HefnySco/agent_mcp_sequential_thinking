@@ -2,10 +2,11 @@
   "mcpServers": {
     "task-orchestrator": {
       "command": "node",
-      "args": ["/home/mhefny/code/mcp/task-orchestrator-mcp/dist/index.js"],
+      "args": ["/home/mhefny/code/mcp/agent_mcp_task_orchestrator/dist/index.js"],
       "env": {
-        "TASK_ORCHESTRATOR_STORAGE_PATH": "/home/mhefny/code/mcp/task-orchestrator-mcp/task-orchestrator-storage.json",
-        "TASK_ORCHESTRATOR_OUTPUT_DIR": "/home/mhefny/code/mcp/task-orchestrator-mcp/output"
+        "TASK_ORCHESTRATOR_STORAGE_BACKEND": "sqlite",
+        "TASK_ORCHESTRATOR_STORAGE_PATH": "/home/mhefny/code/mcp/agent_mcp_task_orchestrator/output",
+        "TASK_ORCHESTRATOR_OUTPUT_DIR": "/home/mhefny/code/mcp/agent_mcp_task_orchestrator/output"
       }
     }
   }

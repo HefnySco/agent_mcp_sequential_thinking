@@ -13,6 +13,7 @@ import { handlerRegistry } from './handlers.js';
 import { SERVER_CONFIG } from './constants.js';
 import { ZodError } from 'zod';
 import { SequentialError } from './errors.js';
+import { StorageFactory } from './storage/StorageFactory.js';
 
 /**
  * Task Orchestrator MCP Server - Main server class
@@ -20,6 +21,7 @@ import { SequentialError } from './errors.js';
 class TaskOrchestratorMCPServer {
   private server: Server;
   private taskOrchestratorService: TaskOrchestratorService;
+  private storageAdapter: any;
   private logger: ReturnType<typeof getLogger>;
 
   constructor() {
@@ -38,12 +40,29 @@ class TaskOrchestratorMCPServer {
       }
     );
 
-    this.taskOrchestratorService = new TaskOrchestratorService(config.getStoragePath());
-    this.taskOrchestratorService.load().catch(err => {
-      this.logger.error('Failed to load task orchestrator service state', { error: err });
-    });
+    this.storageAdapter = StorageFactory.createAdapter(
+      config.getStorageBackend(),
+      config.getStoragePath()
+    );
+    
+    this.taskOrchestratorService = new TaskOrchestratorService(this.storageAdapter);
     
     this.setupHandlers();
+  }
+
+  private async initializeAsync(): Promise<void> {
+    try {
+      const config = getConfigManager();
+      this.logger.info('Initializing storage', { 
+        backend: config.getStorageBackend(),
+        path: config.getStoragePath()
+      });
+      await this.storageAdapter.initialize();
+      await this.taskOrchestratorService.load();
+    } catch (err) {
+      this.logger.error('Failed to initialize task orchestrator', { error: err });
+      console.error('❌ Storage init failed:', err);  // Force visible
+    }
   }
 
   /**
@@ -540,6 +559,9 @@ class TaskOrchestratorMCPServer {
    * Start the MCP server
    */
   async run() {
+    // Initialize storage adapter and load state (blocking)
+    await this.initializeAsync();
+    
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
     this.logger.info('Task Orchestrator MCP server running on stdio');

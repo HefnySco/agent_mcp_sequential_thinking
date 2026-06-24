@@ -21,8 +21,16 @@ export class ConfigManager {
    * Load configuration from environment variables with defaults
    */
   private loadConfig(): SequentialConfig {
-    const storagePath = process.env.TASK_ORCHESTRATOR_STORAGE_PATH || 
-      path.join(PROJECT_ROOT, FILE_CONFIG.DEFAULT_STORAGE_FILENAME);
+    const storageBackend = (process.env.TASK_ORCHESTRATOR_STORAGE_BACKEND || 'json') as 'json' | 'sqlite';
+    
+    const storageDir = process.env.TASK_ORCHESTRATOR_STORAGE_PATH || PROJECT_ROOT;
+    
+    const storagePath = path.join(
+      storageDir,
+      storageBackend === 'sqlite' 
+        ? 'task-orchestrator-storage.db'
+        : FILE_CONFIG.DEFAULT_STORAGE_FILENAME
+    );
     
     const outputDir = process.env.TASK_ORCHESTRATOR_OUTPUT_DIR || 
       path.join(PROJECT_ROOT, FILE_CONFIG.DEFAULT_OUTPUT_DIR);
@@ -32,12 +40,17 @@ export class ConfigManager {
     const saveDebounceMs = parseInt(process.env.TASK_ORCHESTRATOR_SAVE_DEBOUNCE_MS || '1000', 10);
 
     // Validate configuration
+    if (storageBackend !== 'json' && storageBackend !== 'sqlite') {
+      throw new ConfigurationError('TASK_ORCHESTRATOR_STORAGE_BACKEND must be either "json" or "sqlite"');
+    }
+
     if (isNaN(saveDebounceMs) || saveDebounceMs < 0) {
       throw new ConfigurationError('TASK_ORCHESTRATOR_SAVE_DEBOUNCE_MS must be a positive number');
     }
 
     return {
       storagePath,
+      storageBackend,
       outputDir,
       autoSave,
       saveDebounceMs
@@ -56,6 +69,13 @@ export class ConfigManager {
    */
   getStoragePath(): string {
     return this.config.storagePath;
+  }
+
+  /**
+   * Get storage backend
+   */
+  getStorageBackend(): 'json' | 'sqlite' {
+    return this.config.storageBackend;
   }
 
   /**

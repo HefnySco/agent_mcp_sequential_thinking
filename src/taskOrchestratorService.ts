@@ -1,5 +1,3 @@
-import fs from 'fs/promises';
-import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import type {
   Task,
@@ -19,11 +17,13 @@ import {
 } from './errors.js';
 import { TASK_STATUS } from './constants.js';
 import { getConfigManager } from './config.js';
+import type { IStorageAdapter } from './storage/IStorageAdapter.js';
+import { StorageFactory } from './storage/StorageFactory.js';
 /**
  * TaskOrchestratorService manages task execution with dependency tracking
  */
 export class TaskOrchestratorService {
-  private storagePath: string;
+  private storageAdapter: IStorageAdapter;
   private state: SequentialState;
   private saveTimeout: NodeJS.Timeout | null = null;
   private autoSave: boolean;
@@ -31,10 +31,10 @@ export class TaskOrchestratorService {
 
   /**
    * Create a new TaskOrchestratorService instance
-   * @param storagePath - Path to the storage file
+   * @param storageAdapter - Storage adapter to use
    */
-  constructor(storagePath: string) {
-    this.storagePath = storagePath;
+  constructor(storageAdapter: IStorageAdapter) {
+    this.storageAdapter = storageAdapter;
     this.state = {
       tasks: new Map(),
       workflows: new Map(),
@@ -47,65 +47,30 @@ export class TaskOrchestratorService {
   }
 
   /**
-   * Load state from storage file
-   * @throws StorageError if file cannot be read or parsed
+   * Load state from storage
+   * @throws StorageError if storage cannot be read
    */
   async load(): Promise<void> {
     try {
-      const data = await fs.readFile(this.storagePath, 'utf-8');
-      const parsed = JSON.parse(data);
-      
-      this.state.tasks = new Map(
-        Object.entries(parsed.tasks || {}).map(([id, task]: [string, unknown]) => [id, task as Task])
-      );
-      
-      this.state.workflows = new Map(
-        Object.entries(parsed.workflows || {}).map(([id, workflow]: [string, unknown]) => {
-          // Handle both old format (string[]) and new format (Workflow)
-          if (Array.isArray(workflow)) {
-            // Old format - migrate to new format
-            return [id, {
-              id,
-              name: 'Migrated Workflow',
-              taskIds: workflow as string[],
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString()
-            } as Workflow];
-          }
-          return [id, workflow as Workflow];
-        })
-      );
-      
-      this.state.workflowRuns = new Map(
-        Object.entries(parsed.workflowRuns || {}).map(([id, run]: [string, unknown]) => [id, run as WorkflowRun])
-      );
+      this.state = await this.storageAdapter.load();
     } catch (err) {
-      // File doesn't exist or is empty, start with empty state
-      this.state = {
-        tasks: new Map(),
-        workflows: new Map(),
-        workflowRuns: new Map()
-      };
+      throw new StorageError('Failed to load state from storage', err instanceof Error ? err : undefined);
     }
   }
 
   /**
-   * Save state to storage file
-   * @throws StorageError if file cannot be written
+   * Save state to storage
+   * @throws StorageError if storage cannot be written
    */
   async save(): Promise<void> {
+    if (this.storageAdapter && 'db' in this.storageAdapter && !(this.storageAdapter as any).db) {
+      console.warn('⚠️ Save skipped: DB not ready yet');
+      return;
+    }
     try {
-      const data = {
-        tasks: Object.fromEntries(this.state.tasks),
-        workflows: Object.fromEntries(this.state.workflows),
-        workflowRuns: Object.fromEntries(this.state.workflowRuns)
-      };
-      
-      const dir = path.dirname(this.storagePath);
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(this.storagePath, JSON.stringify(data, null, 2));
+      await this.storageAdapter.save(this.state);
     } catch (err) {
-      throw new StorageError('Failed to save state', err instanceof Error ? err : undefined);
+      throw new StorageError('Failed to save state to storage', err instanceof Error ? err : undefined);
     }
   }
 
@@ -139,6 +104,16 @@ export class TaskOrchestratorService {
       this.saveTimeout = null;
     }
     await this.save();
+  }
+
+  /**
+   * Shutdown the service and clear any pending auto-save
+   */
+  async shutdown(): Promise<void> {
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+      this.saveTimeout = null;
+    }
   }
 
   /**
@@ -521,10 +496,11 @@ export class TaskOrchestratorService {
   /**
    * Clear all tasks and workflows
    */
-  clearAll(): void {
+  async clearAll(): Promise<void> {
     this.state.tasks.clear();
     this.state.workflows.clear();
     this.state.workflowRuns.clear();
+    await this.storageAdapter.clear();
     this.triggerSave();
   }
 

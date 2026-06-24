@@ -129,10 +129,16 @@ export interface TaskStats {
 }
 
 /**
+ * Storage backend type
+ */
+export type StorageBackend = 'json' | 'sqlite';
+
+/**
  * Configuration interface
  */
 export interface SequentialConfig {
   storagePath: string;
+  storageBackend: StorageBackend;
   outputDir: string;
   autoSave: boolean;
   saveDebounceMs: number;

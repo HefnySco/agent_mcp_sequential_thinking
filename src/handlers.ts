@@ -138,7 +138,7 @@ export async function handleDeleteTask(
   const { service, logger } = context;
 
   // Validate input
-  const validated = TaskIdSchema.parse(args);
+  const validated = TaskIdSchema.parse(args.id);
 
   const deleted = service.deleteTask(validated);
   
@@ -171,7 +171,7 @@ export async function handleGetTask(
   const { service, logger } = context;
 
   // Validate input
-  const validated = TaskIdSchema.parse(args);
+  const validated = TaskIdSchema.parse(args.id);
 
   const task = service.getTask(validated);
   
@@ -571,7 +571,7 @@ export async function handleGetSubtasks(
   const { service, logger } = context;
 
   // Validate input
-  const validated = TaskIdSchema.parse(args);
+  const validated = TaskIdSchema.parse(args.id);
 
   const subtasks = service.getSubtasks(validated);
 
@@ -682,7 +682,7 @@ export async function handleClearAll(
 ): Promise<{ content: Array<{ type: string; text: string }> }> {
   const { service, logger } = context;
 
-  service.clearAll();
+  await service.clearAll();
   await service.forceSave();
 
   const result = {

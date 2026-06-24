@@ -94,7 +94,12 @@ export async function handleUpdateTask(
   if (validated.name !== undefined) updates.name = validated.name;
   if (validated.description !== undefined) updates.description = validated.description;
   if (validated.dependencies !== undefined) updates.dependencies = validated.dependencies;
+  if (validated.softDependencies !== undefined) updates.softDependencies = validated.softDependencies;
+  if (validated.dependencyTimeouts !== undefined) updates.dependencyTimeouts = validated.dependencyTimeouts;
+  if (validated.externalDependencies !== undefined) updates.externalDependencies = validated.externalDependencies;
+  if (validated.conditionalDependencies !== undefined) updates.conditionalDependencies = validated.conditionalDependencies;
   if (validated.parentTaskId !== undefined) updates.parentTaskId = validated.parentTaskId;
+  if (validated.sessionId !== undefined) updates.sessionId = validated.sessionId;
   if (validated.metadata !== undefined) updates.metadata = validated.metadata;
 
   const task = service.updateTask(validated.id, updates);
@@ -232,14 +237,15 @@ export async function handleListTasks(
   // Group tasks by parent/child relationship
   const parentTasks = tasks.filter(t => !t.parentTaskId);
   const childTasks = tasks.filter(t => t.parentTaskId);
-  
+
   let taskList = '';
-  
-  // First list parent tasks
-  parentTasks.forEach(t => {
+
+  // First list parent tasks (without sessionId)
+  const parentTasksWithoutSession = parentTasks.filter(t => !t.sessionId);
+  parentTasksWithoutSession.forEach(t => {
     const icon = t.status === 'completed' ? '✅' : '⚪';
     taskList += `${icon} ${t.name} (ID: ${t.id})\n`;
-    
+
     // Then list its subtasks
     const subtasks = childTasks.filter(c => c.parentTaskId === t.id);
     if (subtasks.length > 0) {
@@ -249,7 +255,36 @@ export async function handleListTasks(
       });
     }
   });
-  
+
+  // Group unattached tasks by sessionId
+  const tasksWithSession = parentTasks.filter(t => t.sessionId);
+  if (tasksWithSession.length > 0) {
+    const sessionGroups = new Map<string, typeof tasksWithSession>();
+    tasksWithSession.forEach(t => {
+      if (!sessionGroups.has(t.sessionId!)) {
+        sessionGroups.set(t.sessionId!, []);
+      }
+      sessionGroups.get(t.sessionId!)!.push(t);
+    });
+
+    sessionGroups.forEach((sessionTasks, sessionId) => {
+      taskList += `\n[Unattached / Session: ${sessionId}]\n`;
+      sessionTasks.forEach(t => {
+        const icon = t.status === 'completed' ? '✅' : '⚪';
+        taskList += `${icon} ${t.name} (ID: ${t.id})\n`;
+
+        // List subtasks for this task
+        const subtasks = childTasks.filter(c => c.parentTaskId === t.id);
+        if (subtasks.length > 0) {
+          subtasks.forEach(st => {
+            const subIcon = st.status === 'completed' ? '✅' : '⚪';
+            taskList += `  ${subIcon} └─ ${st.name} (ID: ${st.id})\n`;
+          });
+        }
+      });
+    });
+  }
+
   // List orphaned tasks (children whose parent doesn't exist in current list)
   const orphanedTasks = childTasks.filter(c => !parentTasks.find(p => p.id === c.parentTaskId));
   if (orphanedTasks.length > 0) {
@@ -285,18 +320,25 @@ export async function handleExecuteTask(
   // Validate input
   const validated = ExecuteTaskSchema.parse(args);
 
-  const task = service.executeTask(validated.id, validated.result);
-  
+  // Check if task exists
+  const task = service.getTask(validated.id);
   if (!task) {
+    throw new TaskNotFoundError(validated.id);
+  }
+
+  // Allow execution regardless of dependencies - mark as done
+  const executedTask = service.executeTask(validated.id, validated.result);
+
+  if (!executedTask) {
     throw new TaskExecutionError(validated.id, ERROR_MESSAGES.DEPENDENCY_NOT_MET);
   }
 
   await service.forceSave();
 
   // Format result safely to avoid JSON parsing issues
-  let resultText = `✅ Task executed successfully\n\n**Name:** ${task.name}\n**ID:** ${task.id}\n**Status:** ${task.status}`;
-  if (task.completedAt) {
-    resultText += `\n**Completed:** ${task.completedAt}`;
+  let resultText = `✅ Task executed successfully\n\n**Name:** ${executedTask.name}\n**ID:** ${executedTask.id}\n**Status:** ${executedTask.status}`;
+  if (executedTask.completedAt) {
+    resultText += `\n**Completed:** ${executedTask.completedAt}`;
   }
 
   const result = {
@@ -357,8 +399,14 @@ export async function handleMarkInProgress(
   // Validate input
   const validated = MarkInProgressSchema.parse(args);
 
+  // Check if task can be executed first to provide better error messages
+  const canExecute = service.canExecuteTask(validated.id);
+  if (!canExecute.canExecute) {
+    throw new TaskExecutionError(validated.id, canExecute.reason || ERROR_MESSAGES.DEPENDENCY_NOT_MET);
+  }
+
   const task = service.markTaskInProgress(validated.id);
-  
+
   if (!task) {
     throw new TaskExecutionError(validated.id, ERROR_MESSAGES.DEPENDENCY_NOT_MET);
   }
@@ -369,7 +417,15 @@ export async function handleMarkInProgress(
     content: [
       {
         type: 'text',
-        text: `🔄 Task marked as in progress\n\n**Name:** ${task.name}\n**ID:** ${task.id}\n**Started:** ${task.startedAt}`
+        text: JSON.stringify({
+          success: true,
+          task: {
+            id: task.id,
+            name: task.name,
+            status: task.status,
+            startedAt: task.startedAt
+          }
+        }, null, 2)
       }
     ]
   };

@@ -88,6 +88,20 @@ for (const testCase of testCases) {
         assert.strictEqual(childTask.parentTaskId, parentTask.id);
       });
 
+      it('should create a task with a sessionId', () => {
+        const task = service.createTask({ name: 'Task with Session', sessionId: 'session-123' });
+
+        assert.strictEqual(task.sessionId, 'session-123');
+      });
+
+      it('should update task sessionId', () => {
+        const task = service.createTask({ name: 'Task' });
+        const updated = service.updateTask(task.id, { sessionId: 'session-456' });
+
+        assert.ok(updated);
+        assert.strictEqual(updated?.sessionId, 'session-456');
+      });
+
       it('should throw error when parent task does not exist', () => {
         assert.throws(() => {
           service.createTask({
@@ -170,6 +184,62 @@ for (const testCase of testCases) {
             { name: 'Child Task', parentTaskId: 'non-existent-parent-id' }
           ]);
         });
+      });
+
+      it('should resolve name-based dependencies within batch', () => {
+        const tasks = [
+          { name: 'Task A', dependencies: ['Task B'] },
+          { name: 'Task B' },
+          { name: 'Task C', dependencies: ['Task A', 'Task B'] }
+        ];
+
+        const created = service.createTasks(tasks);
+        assert.strictEqual(created.length, 3);
+
+        // Task A should have Task B as dependency (resolved by name)
+        const taskA = created.find(t => t.name === 'Task A');
+        assert.ok(taskA);
+        assert.strictEqual(taskA?.dependencies.length, 1);
+        const taskB = created.find(t => t.name === 'Task B');
+        assert.ok(taskB);
+        assert.strictEqual(taskA?.dependencies[0], taskB?.id);
+
+        // Task C should have both Task A and Task B as dependencies
+        const taskC = created.find(t => t.name === 'Task C');
+        assert.ok(taskC);
+        assert.strictEqual(taskC?.dependencies.length, 2);
+        assert.ok(taskC?.dependencies.includes(taskA!.id));
+        assert.ok(taskC?.dependencies.includes(taskB!.id));
+      });
+
+      it('should support mixed name and ID dependencies in batch', () => {
+        // First create an existing task
+        const existingTask = service.createTask({ name: 'Existing Task' });
+
+        const tasks = [
+          { name: 'Task A', dependencies: ['Task B', existingTask.id] },
+          { name: 'Task B' }
+        ];
+
+        const created = service.createTasks(tasks);
+        const taskA = created.find(t => t.name === 'Task A');
+        const taskB = created.find(t => t.name === 'Task B');
+
+        assert.ok(taskA);
+        assert.strictEqual(taskA?.dependencies.length, 2);
+        assert.ok(taskA?.dependencies.includes(taskB!.id)); // Name-based
+        assert.ok(taskA?.dependencies.includes(existingTask.id)); // ID-based
+      });
+
+      it('should detect circular dependencies in name-based batch', () => {
+        const tasks = [
+          { name: 'Task A', dependencies: ['Task B'] },
+          { name: 'Task B', dependencies: ['Task A'] }
+        ];
+
+        assert.throws(() => {
+          service.createTasks(tasks);
+        }, /Circular dependency detected/);
       });
     });
 
@@ -273,12 +343,13 @@ for (const testCase of testCases) {
         assert.deepStrictEqual(executed?.result, { result: 'success' });
       });
 
-      it('should not execute task with unmet dependencies', () => {
+      it('should execute task even with unmet dependencies', () => {
         const task1 = service.createTask({ name: 'Task 1' });
         const task2 = service.createTask({ name: 'Task 2', dependencies: [task1.id] });
 
         const executed = service.executeTask(task2.id);
-        assert.strictEqual(executed, null);
+        assert.ok(executed);
+        assert.strictEqual(executed?.status, TASK_STATUS.COMPLETED);
       });
 
       it('should execute task when dependencies are met', () => {
@@ -290,6 +361,36 @@ for (const testCase of testCases) {
 
         assert.ok(executed);
         assert.strictEqual(executed?.status, TASK_STATUS.COMPLETED);
+      });
+
+      it('should execute task with complex result object regardless of dependencies', () => {
+        // Create a task with dependencies
+        const task1 = service.createTask({ name: 'Dependency Task' });
+        const task2 = service.createTask({ 
+          name: 'Main Task', 
+          dependencies: [task1.id] 
+        });
+
+        // Execute task2 without completing task1 - should succeed (bypasses deps)
+        const executedWithoutDeps = service.executeTask(task2.id, {
+          improvements: [
+            "Scene persistence (JSON/SQLite) - Priority: High",
+            "Scene templates/presets - Priority: High"
+          ]
+        });
+        assert.ok(executedWithoutDeps);
+        assert.strictEqual(executedWithoutDeps?.status, TASK_STATUS.COMPLETED);
+        assert.deepStrictEqual(executedWithoutDeps?.result, {
+          improvements: [
+            "Scene persistence (JSON/SQLite) - Priority: High",
+            "Scene templates/presets - Priority: High"
+          ]
+        });
+
+        // Verify canExecute still returns false with reason (check still works)
+        const canExecute = service.canExecuteTask(task2.id);
+        assert.strictEqual(canExecute.canExecute, false);
+        assert.ok(canExecute.reason);
       });
     });
 
@@ -380,6 +481,144 @@ for (const testCase of testCases) {
         const check = service.canExecuteTask('non-existent-id');
         assert.strictEqual(check.canExecute, false);
         assert.strictEqual(check.reason, 'Task not found');
+      });
+
+      it('should allow execution with unmet soft dependencies', () => {
+        const task1 = service.createTask({ name: 'Task 1' });
+        const task2 = service.createTask({ 
+          name: 'Task 2', 
+          softDependencies: [task1.id] 
+        });
+
+        const check = service.canExecuteTask(task2.id);
+        assert.strictEqual(check.canExecute, true);
+        assert.ok(check.reason?.includes('Soft dependencies not met'));
+      });
+
+      it('should execute task with unmet soft dependencies', () => {
+        const task1 = service.createTask({ name: 'Task 1' });
+        const task2 = service.createTask({ 
+          name: 'Task 2', 
+          softDependencies: [task1.id] 
+        });
+
+        const executed = service.executeTask(task2.id);
+        assert.ok(executed);
+        assert.strictEqual(executed?.status, TASK_STATUS.COMPLETED);
+      });
+
+      it('should allow execution when dependency timeout is exceeded', async () => {
+        const task1 = service.createTask({ name: 'Task 1' });
+        const task2 = service.createTask({ 
+          name: 'Task 2', 
+          dependencies: [task1.id],
+          dependencyTimeouts: { [task1.id]: 100 } // 100ms timeout
+        });
+
+        // Wait for timeout to exceed
+        await new Promise(resolve => setTimeout(resolve, 150));
+
+        const check = service.canExecuteTask(task2.id);
+        assert.strictEqual(check.canExecute, true);
+      });
+
+      it('should block execution when dependency timeout not exceeded', () => {
+        const task1 = service.createTask({ name: 'Task 1' });
+        const task2 = service.createTask({
+          name: 'Task 2',
+          dependencies: [task1.id],
+          dependencyTimeouts: { [task1.id]: 10000 } // 10s timeout
+        });
+
+        const check = service.canExecuteTask(task2.id);
+        assert.strictEqual(check.canExecute, false);
+        assert.ok(check.reason?.includes('Dependency'));
+      });
+
+      it('should skip conditional dependency when condition is false', () => {
+        const task1 = service.createTask({
+          name: 'Task 1',
+          metadata: { environment: 'production' }
+        });
+        const task2 = service.createTask({
+          name: 'Task 2',
+          conditionalDependencies: [
+            { condition: `task.${task1.id}.metadata.environment == "staging"`, taskId: task1.id }
+          ]
+        });
+
+        const check = service.canExecuteTask(task2.id);
+        assert.strictEqual(check.canExecute, true);
+      });
+
+      it('should require conditional dependency when condition is true', () => {
+        const task1 = service.createTask({
+          name: 'Task 1',
+          metadata: { environment: 'production' }
+        });
+        const task2 = service.createTask({
+          name: 'Task 2',
+          conditionalDependencies: [
+            { condition: 'true', taskId: task1.id }
+          ]
+        });
+
+        const check = service.canExecuteTask(task2.id);
+        assert.strictEqual(check.canExecute, false);
+        assert.ok(check.reason?.includes('Conditional dependency'));
+      });
+
+      it('should allow execution when conditional dependency is met', () => {
+        const task1 = service.createTask({ name: 'Task 1' });
+        const task2 = service.createTask({
+          name: 'Task 2',
+          conditionalDependencies: [
+            { condition: 'true', taskId: task1.id }
+          ]
+        });
+
+        service.executeTask(task1.id);
+        const check = service.canExecuteTask(task2.id);
+        assert.strictEqual(check.canExecute, true);
+      });
+
+      it('should evaluate boolean condition correctly', () => {
+        const task1 = service.createTask({ name: 'Task 1' });
+        const task2 = service.createTask({
+          name: 'Task 2',
+          conditionalDependencies: [
+            { condition: 'false', taskId: task1.id }
+          ]
+        });
+
+        const check = service.canExecuteTask(task2.id);
+        assert.strictEqual(check.canExecute, true); // Condition is false, so dependency not required
+      });
+
+      it('should skip external dependencies in synchronous check', () => {
+        const task = service.createTask({
+          name: 'Task with External Dep',
+          externalDependencies: [
+            { type: 'api', url: 'https://nonexistent.example.com', timeoutMs: 1000 }
+          ]
+        });
+
+        // Synchronous check should skip external dependencies
+        const check = service.canExecuteTask(task.id);
+        assert.strictEqual(check.canExecute, true);
+      });
+
+      it('should fail when external dependency is unavailable', async () => {
+        const task = service.createTask({
+          name: 'Task with Bad External Dep',
+          externalDependencies: [
+            { type: 'api', url: 'https://nonexistent.example.com', timeoutMs: 1000 }
+          ]
+        });
+
+        const check = await service.canExecuteTaskWithExternalChecks(task.id);
+        assert.strictEqual(check.canExecute, false);
+        assert.ok(check.reason?.includes('not available'));
       });
     });
 

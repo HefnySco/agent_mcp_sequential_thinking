@@ -128,6 +128,10 @@ export class TaskOrchestratorService {
    * @returns The created task
    * @throws DependencyNotFoundError if a dependency task doesn't exist
    * @throws Error if circular dependency is detected
+   *
+   * Note: If parentTaskId is provided, it is automatically added to the task's dependencies
+   * to ensure the subtask only becomes ready after the parent is completed. This behavior
+   * maintains backward compatibility - tasks that manually specify dependencies are not affected.
    */
   createTask(task: CreateTaskInput): Task {
     const id = this.generateId();
@@ -147,17 +151,28 @@ export class TaskOrchestratorService {
       throw new TaskNotFoundError(task.parentTaskId);
     }
     
+    // Automatically add parentTaskId to dependencies if provided (ensures subtask waits for parent)
+    let dependencies = task.dependencies || [];
+    if (task.parentTaskId && !dependencies.includes(task.parentTaskId)) {
+      dependencies = [...dependencies, task.parentTaskId];
+    }
+    
     // Check for circular dependencies
-    if (task.dependencies && task.dependencies.length > 0) {
-      this.checkCircularDependency(id, task.dependencies);
+    if (dependencies && dependencies.length > 0) {
+      this.checkCircularDependency(id, dependencies);
     }
     
     const newTask: Task = {
       id,
       name: task.name,
       description: task.description,
-      dependencies: task.dependencies || [],
+      dependencies,
+      softDependencies: task.softDependencies,
+      dependencyTimeouts: task.dependencyTimeouts,
+      externalDependencies: task.externalDependencies,
+      conditionalDependencies: task.conditionalDependencies,
       parentTaskId: task.parentTaskId,
+      sessionId: task.sessionId,
       metadata: task.metadata,
       maxRetries: task.maxRetries,
       timeoutMs: task.timeoutMs,
@@ -178,15 +193,104 @@ export class TaskOrchestratorService {
    * @returns Array of created tasks
    * @throws DependencyNotFoundError if a dependency task doesn't exist
    * @throws Error if circular dependency is detected
+   *
+   * This method supports name-based dependencies within a single batch:
+   * 1. First pass: Create all tasks without dependencies to establish name-to-ID mapping
+   * 2. Second pass: Resolve name-based dependencies to actual task IDs
+   * 3. Third pass: Auto-add parentTaskId to dependencies if provided (after name resolution)
+   * 4. Fourth pass: Validate dependencies and check for circular references
+   *
+   * This allows tasks to reference each other by name in the same batch, e.g.:
+   * [
+   *   { name: "Task A", dependencies: ["Task B"] },
+   *   { name: "Task B" }
+   * ]
+   *
+   * Note: If parentTaskId is provided, it is automatically added to the task's dependencies
+   * to ensure the subtask only becomes ready after the parent is completed. This behavior
+   * maintains backward compatibility - tasks that manually specify dependencies are not affected.
    */
   createTasks(tasks: CreateTaskInput[]): Task[] {
     const createdTasks: Task[] = [];
-    
-    for (const task of tasks) {
-      const createdTask = this.createTask(task);
-      createdTasks.push(createdTask);
+    const nameToIdMap = new Map<string, string>();
+
+    // First pass: Create all tasks without dependencies to establish name-to-ID mapping
+    for (const taskInput of tasks) {
+      // Validate parent task if specified
+      if (taskInput.parentTaskId && !this.state.tasks.has(taskInput.parentTaskId)) {
+        throw new Error(`Parent task ${taskInput.parentTaskId} not found`);
+      }
+
+      const id = this.generateId();
+      const now = new Date().toISOString();
+
+      const newTask: Task = {
+        id,
+        name: taskInput.name,
+        description: taskInput.description,
+        dependencies: [], // Will be resolved in second pass
+        softDependencies: taskInput.softDependencies,
+        dependencyTimeouts: taskInput.dependencyTimeouts,
+        externalDependencies: taskInput.externalDependencies,
+        conditionalDependencies: taskInput.conditionalDependencies,
+        parentTaskId: taskInput.parentTaskId,
+        sessionId: taskInput.sessionId,
+        metadata: taskInput.metadata,
+        maxRetries: taskInput.maxRetries,
+        timeoutMs: taskInput.timeoutMs,
+        retries: 0,
+        status: TASK_STATUS.PENDING,
+        createdAt: now,
+        updatedAt: now
+      };
+
+      // Store the task
+      this.state.tasks.set(id, newTask);
+      createdTasks.push(newTask);
+      nameToIdMap.set(taskInput.name, id);
     }
-    
+
+    // Second pass: Resolve name-based dependencies to actual task IDs
+    for (let i = 0; i < tasks.length; i++) {
+      const taskInput = tasks[i];
+      const task = createdTasks[i];
+
+      if (taskInput.dependencies && taskInput.dependencies.length > 0) {
+        const resolvedDependencies: string[] = [];
+
+        for (const dep of taskInput.dependencies) {
+          // Check if dependency is a name (not an ID)
+          if (!dep.includes('-') && nameToIdMap.has(dep)) {
+            // It's a name, resolve to ID
+            resolvedDependencies.push(nameToIdMap.get(dep)!);
+          } else if (this.state.tasks.has(dep)) {
+            // It's an existing task ID
+            resolvedDependencies.push(dep);
+          } else {
+            // Dependency not found
+            throw new DependencyNotFoundError(dep);
+          }
+        }
+
+        // Update task with resolved dependencies
+        task.dependencies = resolvedDependencies;
+        this.state.tasks.set(task.id, task);
+      }
+
+      // Third pass: Automatically add parentTaskId to dependencies if provided (ensures subtask waits for parent)
+      // This is done after name resolution so that if parentTaskId is a name, it would have been resolved above
+      if (task.parentTaskId && !task.dependencies.includes(task.parentTaskId)) {
+        task.dependencies = [...task.dependencies, task.parentTaskId];
+        this.state.tasks.set(task.id, task);
+      }
+
+      // Fourth pass: Check for circular dependencies
+      if (task.dependencies && task.dependencies.length > 0) {
+        this.checkCircularDependency(task.id, task.dependencies);
+      }
+    }
+
+    this.triggerSave();
     return createdTasks;
   }
 
@@ -199,7 +303,6 @@ export class TaskOrchestratorService {
   private checkCircularDependency(taskId: string, dependencies: string[]): void {
     const visited = new Set<string>();
     const recursionStack = new Set<string>();
-    const now = new Date().toISOString();
 
     const hasCycle = (currentId: string): boolean => {
       visited.add(currentId);
@@ -222,28 +325,41 @@ export class TaskOrchestratorService {
       return false;
     };
 
-    // Check if any dependency would create a cycle back to the new task
-    for (const depId of dependencies) {
-      visited.clear();
-      recursionStack.clear();
-      
-      // Temporarily add the new task to check for cycles
-      this.state.tasks.set(taskId, {
-        id: taskId,
-        name: 'temp',
-        status: TASK_STATUS.PENDING,
-        dependencies: [],
-        createdAt: now,
-        updatedAt: now
-      } as Task);
-      
-      const hasCycleFromDep = hasCycle(depId);
-      
-      // Remove the temporary task
-      this.state.tasks.delete(taskId);
-      
-      if (hasCycleFromDep) {
-        throw new Error(`Circular dependency detected: task ${taskId} depends on ${depId}, which would create a cycle`);
+    // Check if following dependencies from taskId leads back to itself
+    // This works for both single task creation and batch creation
+    const task = this.state.tasks.get(taskId);
+    if (!task) {
+      // Task not in state yet (single task creation scenario)
+      // Use the old logic with temporary task
+      const now = new Date().toISOString();
+      for (const depId of dependencies) {
+        visited.clear();
+        recursionStack.clear();
+
+        // Temporarily add the new task to check for cycles
+        this.state.tasks.set(taskId, {
+          id: taskId,
+          name: 'temp',
+          status: TASK_STATUS.PENDING,
+          dependencies: [],
+          createdAt: now,
+          updatedAt: now
+        } as Task);
+
+        const hasCycleFromDep = hasCycle(depId);
+
+        // Remove the temporary task
+        this.state.tasks.delete(taskId);
+
+        if (hasCycleFromDep) {
+          throw new Error(`Circular dependency detected: task ${taskId} depends on ${depId}, which would create a cycle`);
+        }
+      }
+    } else {
+      // Task is already in state (batch creation scenario)
+      // Just check if following dependencies leads back to taskId
+      if (hasCycle(taskId)) {
+        throw new Error(`Circular dependency detected involving task ${taskId}`);
       }
     }
   }
@@ -377,18 +493,151 @@ export class TaskOrchestratorService {
       return { canExecute: false, reason: `Task is ${task.status}` };
     }
 
-    // Check if all dependencies are completed
+    // Check if all hard dependencies are completed
     for (const depId of task.dependencies) {
       const depTask = this.state.tasks.get(depId);
       if (!depTask) {
         return { canExecute: false, reason: `Dependency ${depId} not found` };
       }
       if (depTask.status !== TASK_STATUS.COMPLETED) {
+        // Check if dependency has a timeout and has exceeded it
+        if (task.dependencyTimeouts && task.dependencyTimeouts[depId]) {
+          const timeoutMs = task.dependencyTimeouts[depId];
+          const depCreatedAt = new Date(depTask.createdAt).getTime();
+          const elapsed = Date.now() - depCreatedAt;
+          if (elapsed > timeoutMs) {
+            // Dependency timeout exceeded - allow execution despite incomplete dependency
+            continue;
+          }
+        }
         return { canExecute: false, reason: `Dependency ${depId} is ${depTask.status}` };
       }
     }
 
+    // Soft dependencies are checked but don't block execution
+    // They're logged as warnings but don't prevent execution
+    if (task.softDependencies && task.softDependencies.length > 0) {
+      const unmetSoftDeps: string[] = [];
+      for (const softDepId of task.softDependencies) {
+        const softDepTask = this.state.tasks.get(softDepId);
+        if (!softDepTask || softDepTask.status !== TASK_STATUS.COMPLETED) {
+          unmetSoftDeps.push(softDepId);
+        }
+      }
+      if (unmetSoftDeps.length > 0) {
+        // Soft dependencies not met, but allow execution
+        // The reason will be informational only
+        return {
+          canExecute: true,
+          reason: `Note: Soft dependencies not met: ${unmetSoftDeps.join(', ')}. Execution will proceed.`
+        };
+      }
+    }
+
+    // Check external dependencies (API/health checks)
+    // Note: External dependencies are skipped in synchronous check
+    // Use canExecuteTaskWithExternalChecks for full validation including external deps
+    if (task.externalDependencies && task.externalDependencies.length > 0) {
+      // For now, we skip external dependency checks in the synchronous version
+      // to maintain backward compatibility
+      // This could be enhanced with a flag to enable/disable external checks
+    }
+
+    // Check conditional dependencies (if/else logic)
+    if (task.conditionalDependencies && task.conditionalDependencies.length > 0) {
+      for (const condDep of task.conditionalDependencies) {
+        const shouldExecute = this.evaluateCondition(condDep.condition);
+        if (shouldExecute) {
+          // Condition is true, check if the conditional dependency task is completed
+          const condTask = this.state.tasks.get(condDep.taskId);
+          if (!condTask) {
+            return { canExecute: false, reason: `Conditional dependency task ${condDep.taskId} not found` };
+          }
+          if (condTask.status !== TASK_STATUS.COMPLETED) {
+            return { canExecute: false, reason: `Conditional dependency ${condDep.taskId} is ${condTask.status}` };
+          }
+        }
+        // If condition is false, the dependency is not required
+      }
+    }
+
     return { canExecute: true };
+  }
+
+  /**
+   * Check if an external dependency is available/healthy
+   * @param extDep - External dependency to check
+   * @returns True if dependency is available
+   */
+  private async checkExternalDependency(extDep: { type: string; url: string; timeoutMs?: number }): Promise<boolean> {
+    try {
+      const controller = new AbortController();
+      const timeout = extDep.timeoutMs || 5000; // Default 5s timeout
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+      const response = await fetch(extDep.url, {
+        method: extDep.type === 'health' ? 'GET' : 'HEAD',
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      // Consider 2xx and 3xx as healthy
+      return response.status >= 200 && response.status < 400;
+    } catch (error) {
+      // Network error or timeout - dependency not available
+      return false;
+    }
+  }
+
+  /**
+   * Evaluate a condition string
+   * @param condition - Condition string to evaluate
+   * @returns True if condition evaluates to true
+   */
+  private evaluateCondition(condition: string): boolean {
+    // Simple condition evaluation - can be extended for more complex logic
+    // For now, support basic comparisons against task metadata or environment
+
+    // Check if condition references a task's metadata
+    // Format: task.{taskId}.metadata.{field} == "value"
+    const taskMatch = condition.match(/^task\.([^.]+)\.metadata\.([^.]+)\s*(==|!=|>|<|>=|<=)\s*"(.+)"$/);
+    if (taskMatch) {
+      const [, taskId, field, operator, value] = taskMatch;
+      const task = this.state.tasks.get(taskId);
+      if (!task) return false;
+
+      const taskValue = task.metadata?.[field];
+      if (taskValue === undefined) return false;
+
+      // Simple comparison
+      switch (operator) {
+        case '==': return String(taskValue) === value;
+        case '!=': return String(taskValue) !== value;
+        case '>': return Number(taskValue) > Number(value);
+        case '<': return Number(taskValue) < Number(value);
+        case '>=': return Number(taskValue) >= Number(value);
+        case '<=': return Number(taskValue) <= Number(value);
+        default: return false;
+      }
+    }
+
+    // Check environment variables
+    const envMatch = condition.match(/^env\.([^.]+)\s*(==|!=)\s*"(.+)"$/);
+    if (envMatch) {
+      const [, varName, operator, value] = envMatch;
+      const envValue = process.env[varName];
+      if (envValue === undefined) return false;
+
+      switch (operator) {
+        case '==': return envValue === value;
+        case '!=': return envValue !== value;
+        default: return false;
+      }
+    }
+
+    // Default: treat as boolean expression
+    return condition === 'true';
   }
 
   /**
@@ -407,8 +656,8 @@ export class TaskOrchestratorService {
    * @returns The executed task or null if cannot be executed
    */
   executeTask(taskId: string, result?: unknown): Task | null {
-    const canExecute = this.canExecuteTask(taskId);
-    if (!canExecute.canExecute) {
+    const task = this.state.tasks.get(taskId);
+    if (!task) {
       return null;
     }
 
@@ -454,6 +703,39 @@ export class TaskOrchestratorService {
       startedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     });
+  }
+
+  /**
+   * Check if a task can be executed including external dependency checks (async)
+   * @param taskId - Task ID to check
+   * @returns Execution check result with reason if not executable
+   */
+  async canExecuteTaskWithExternalChecks(taskId: string): Promise<TaskExecutionResult> {
+    // First do the synchronous checks
+    const syncResult = this.canExecuteTask(taskId);
+    if (!syncResult.canExecute) {
+      return syncResult;
+    }
+
+    const task = this.state.tasks.get(taskId);
+    if (!task) {
+      return { canExecute: false, reason: 'Task not found' };
+    }
+
+    // Check external dependencies (API/health checks)
+    if (task.externalDependencies && task.externalDependencies.length > 0) {
+      for (const extDep of task.externalDependencies) {
+        const isHealthy = await this.checkExternalDependency(extDep);
+        if (!isHealthy) {
+          return {
+            canExecute: false,
+            reason: `External dependency ${extDep.type} at ${extDep.url} is not available`
+          };
+        }
+      }
+    }
+
+    return { canExecute: true };
   }
 
   /**

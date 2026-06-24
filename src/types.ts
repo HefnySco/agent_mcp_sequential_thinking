@@ -4,6 +4,36 @@
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 
 /**
+ * Dependency with optional timeout
+ */
+export interface DependencyWithTimeout {
+  taskId: string;
+  timeoutMs?: number;
+}
+
+/**
+ * External dependency type
+ */
+export type ExternalDependencyType = 'api' | 'health';
+
+/**
+ * External dependency for service/API health checks
+ */
+export interface ExternalDependency {
+  type: ExternalDependencyType;
+  url: string;
+  timeoutMs?: number;
+}
+
+/**
+ * Conditional dependency with if/else logic
+ */
+export interface ConditionalDependency {
+  condition: string;
+  taskId: string;
+}
+
+/**
  * Task interface representing a single task in the system
  */
 export interface Task {
@@ -12,7 +42,12 @@ export interface Task {
   description?: string;
   status: TaskStatus;
   dependencies: string[];
+  softDependencies?: string[]; // Optional dependencies that don't block execution
+  dependencyTimeouts?: Record<string, number>; // Task ID -> timeout in ms
+  externalDependencies?: ExternalDependency[];
+  conditionalDependencies?: ConditionalDependency[];
   parentTaskId?: string;
+  sessionId?: string; // Optional session ID for grouping unattached tasks
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
@@ -32,7 +67,12 @@ export interface CreateTaskInput {
   name: string;
   description?: string;
   dependencies?: string[];
+  softDependencies?: string[];
+  dependencyTimeouts?: Record<string, number>;
+  externalDependencies?: ExternalDependency[];
+  conditionalDependencies?: ConditionalDependency[];
   parentTaskId?: string;
+  sessionId?: string; // Optional session ID for grouping unattached tasks
   metadata?: Record<string, unknown>;
   maxRetries?: number;
   timeoutMs?: number;
@@ -46,7 +86,12 @@ export interface UpdateTaskInput {
   description?: string;
   status?: TaskStatus;
   dependencies?: string[];
+  softDependencies?: string[];
+  dependencyTimeouts?: Record<string, number>;
+  externalDependencies?: ExternalDependency[];
+  conditionalDependencies?: ConditionalDependency[];
   parentTaskId?: string;
+  sessionId?: string; // Optional session ID for grouping unattached tasks
   metadata?: Record<string, unknown>;
   result?: unknown;
   error?: string;

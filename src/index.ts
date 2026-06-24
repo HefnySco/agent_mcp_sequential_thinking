@@ -74,7 +74,7 @@ class TaskOrchestratorMCPServer {
         tools: [
           {
             name: 'create_tasks',
-            description: 'Create one or more tasks with optional dependencies and parent tasks',
+            description: 'Create one or more tasks with optional dependencies and parent tasks. IMPORTANT: For new independent task groups/sessions, strongly prefer using create_workflow instead to keep tasks organized. When creating tasks outside a workflow context, always include a meaningful sessionId in metadata (e.g., "bugfix-123", "feature-auth", "session-2024-06-24") to group related tasks together. This enables better task organization, session isolation, and cleanup.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -104,7 +104,7 @@ class TaskOrchestratorMCPServer {
                       },
                       metadata: {
                         type: 'object',
-                        description: 'Optional metadata for the task'
+                        description: 'Optional metadata for the task. Include sessionId here to group related tasks (e.g., { "sessionId": "feature-auth" })'
                       },
                       maxRetries: {
                         type: 'number',
@@ -121,7 +121,7 @@ class TaskOrchestratorMCPServer {
           },
           {
             name: 'update_task',
-            description: 'Update an existing task',
+            description: 'Update an existing task. You can add or update the sessionId in metadata to better organize tasks into sessions.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -150,7 +150,7 @@ class TaskOrchestratorMCPServer {
                 },
                 metadata: {
                   type: 'object',
-                  description: 'New metadata for the task'
+                  description: 'New metadata for the task. Include sessionId here to group related tasks (e.g., { "sessionId": "feature-auth" })'
                 }
               },
               required: ['id']
@@ -200,7 +200,7 @@ class TaskOrchestratorMCPServer {
           },
           {
             name: 'list_tasks',
-            description: 'List all tasks or filter by status',
+            description: 'List all tasks or filter by status. Tasks are organized by sessionId (in metadata) or workflow membership. Use this to review task organization and identify tasks that need session grouping. Consider using create_workflow to group related tasks into coherent sessions for better management.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -314,20 +314,20 @@ class TaskOrchestratorMCPServer {
           },
           {
             name: 'create_workflow',
-            description: 'Create a workflow (group of tasks in sequence)',
+            description: 'Create a workflow (group of tasks in sequence). RECOMMENDED: Use workflows for new independent task groups/sessions instead of loose tasks. Workflows provide automatic task grouping, dependency-aware execution, session isolation, and easier cleanup. This is the preferred way to organize coherent task groups (e.g., "deploy-production", "fix-bug-123", "feature-implementation").',
             inputSchema: {
               type: 'object',
               properties: {
                 name: {
                   type: 'string',
-                  description: 'The name of the workflow'
+                  description: 'The name of the workflow. Use a descriptive name that reflects the session/purpose (e.g., "deploy-production", "bugfix-auth-issue")'
                 },
                 taskIds: {
                   type: 'array',
                   items: {
                     type: 'string'
                   },
-                  description: 'Array of task IDs in the workflow'
+                  description: 'Array of task IDs in the workflow. Tasks should be created first using create_tasks.'
                 }
               },
               required: ['name', 'taskIds']
@@ -435,7 +435,7 @@ class TaskOrchestratorMCPServer {
           },
           {
             name: 'get_stats',
-            description: 'Get statistics about tasks and workflows',
+            description: 'Get statistics about tasks and workflows. Use this to monitor task organization and session health. Well-organized tasks should be grouped by sessionId or workflow. Consider creating workflows for loose task groups to improve session management.',
             inputSchema: {
               type: 'object',
               properties: {}

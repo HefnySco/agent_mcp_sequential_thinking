@@ -7,13 +7,35 @@ import type { TaskStatus } from './types.js';
 const TaskStatusSchema = z.enum(['pending', 'in_progress', 'completed', 'failed']);
 
 /**
+ * Zod schema for external dependency
+ */
+const ExternalDependencySchema = z.object({
+  type: z.enum(['api', 'health']),
+  url: z.string().url('Invalid URL format'),
+  timeoutMs: z.number().int().min(0).optional()
+});
+
+/**
+ * Zod schema for conditional dependency
+ */
+const ConditionalDependencySchema = z.object({
+  condition: z.string().min(1, 'Condition is required'),
+  taskId: z.string().min(1, 'Task ID is required')
+});
+
+/**
  * Zod schema for creating a task
  */
 export const CreateTaskSchema = z.object({
   name: z.string().min(1, 'Task name is required').max(255, 'Task name must be less than 255 characters'),
   description: z.string().max(1000, 'Description must be less than 1000 characters').optional(),
   dependencies: z.array(z.string().min(1)).default([]),
+  softDependencies: z.array(z.string().min(1)).optional(),
+  dependencyTimeouts: z.record(z.string().min(1), z.number().int().min(0)).optional(),
+  externalDependencies: z.array(ExternalDependencySchema).optional(),
+  conditionalDependencies: z.array(ConditionalDependencySchema).optional(),
   parentTaskId: z.string().optional(),
+  sessionId: z.string().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   maxRetries: z.number().int().min(0).optional(),
   timeoutMs: z.number().int().min(0).optional()
@@ -34,7 +56,12 @@ export const UpdateTaskSchema = z.object({
   name: z.string().min(1).max(255).optional(),
   description: z.string().max(1000).optional(),
   dependencies: z.array(z.string().min(1)).optional(),
+  softDependencies: z.array(z.string().min(1)).optional(),
+  dependencyTimeouts: z.record(z.string().min(1), z.number().int().min(0)).optional(),
+  externalDependencies: z.array(ExternalDependencySchema).optional(),
+  conditionalDependencies: z.array(ConditionalDependencySchema).optional(),
   parentTaskId: z.string().optional(),
+  sessionId: z.string().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   timeoutMs: z.number().int().min(0).optional()
 });

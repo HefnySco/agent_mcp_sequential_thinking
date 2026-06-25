@@ -13,7 +13,8 @@ import type {
 import {
   StorageError,
   TaskNotFoundError,
-  DependencyNotFoundError
+  DependencyNotFoundError,
+  ValidationError
 } from './errors.js';
 import { TASK_STATUS } from './constants.js';
 import { getConfigManager } from './config.js';
@@ -129,9 +130,8 @@ export class TaskOrchestratorService {
    * @throws DependencyNotFoundError if a dependency task doesn't exist
    * @throws Error if circular dependency is detected
    *
-   * Note: If parentTaskId is provided, it is automatically added to the task's dependencies
-   * to ensure the subtask only becomes ready after the parent is completed. This behavior
-   * maintains backward compatibility - tasks that manually specify dependencies are not affected.
+   * Note: Parent tasks now wait for their subtasks to complete before they can be marked
+   * as completed. Subtasks can start independently of their parent's status.
    */
   createTask(task: CreateTaskInput): Task {
     const id = this.generateId();
@@ -151,15 +151,22 @@ export class TaskOrchestratorService {
       throw new TaskNotFoundError(task.parentTaskId);
     }
     
-    // Automatically add parentTaskId to dependencies if provided (ensures subtask waits for parent)
+    // Dependencies are NOT auto-added from parentTaskId
+    // Subtasks can start independently; parent waits for subtasks to complete
     let dependencies = task.dependencies || [];
-    if (task.parentTaskId && !dependencies.includes(task.parentTaskId)) {
-      dependencies = [...dependencies, task.parentTaskId];
-    }
     
     // Check for circular dependencies
     if (dependencies && dependencies.length > 0) {
       this.checkCircularDependency(id, dependencies);
+    }
+
+    // Inherit sessionId from parent if not explicitly provided
+    let sessionId = task.sessionId;
+    if (!sessionId && task.parentTaskId) {
+      const parentTask = this.state.tasks.get(task.parentTaskId);
+      if (parentTask) {
+        sessionId = parentTask.sessionId;
+      }
     }
     
     const newTask: Task = {
@@ -172,7 +179,7 @@ export class TaskOrchestratorService {
       externalDependencies: task.externalDependencies,
       conditionalDependencies: task.conditionalDependencies,
       parentTaskId: task.parentTaskId,
-      sessionId: task.sessionId,
+      sessionId,
       metadata: task.metadata,
       maxRetries: task.maxRetries,
       timeoutMs: task.timeoutMs,
@@ -190,39 +197,111 @@ export class TaskOrchestratorService {
   /**
    * Create multiple tasks in batch
    * @param tasks - Array of task creation inputs
-   * @returns Array of created tasks
+   * @param options - Optional batch-level options (default deduplication strategy, etc.)
+   * @returns Array of created or reused tasks
    * @throws DependencyNotFoundError if a dependency task doesn't exist
-   * @throws Error if circular dependency is detected
+   * @throws Error if circular dependency is detected or duplicate is found with 'error' strategy
    *
-   * This method supports name-based dependencies within a single batch:
-   * 1. First pass: Create all tasks without dependencies to establish name-to-ID mapping
-   * 2. Second pass: Resolve name-based dependencies to actual task IDs
-   * 3. Third pass: Auto-add parentTaskId to dependencies if provided (after name resolution)
+   * This method supports both positional dependencies within a single batch and references
+   * to existing task IDs:
+   * 1. First pass: Deduplicate against existing tasks and create new tasks without dependencies
+   * 2. Second pass: Resolve positional dependencies to actual task IDs, and validate existing IDs
+   * 3. Third pass: Auto-add parentTaskId to dependencies if provided, inherit sessionId from parent
    * 4. Fourth pass: Validate dependencies and check for circular references
    *
-   * This allows tasks to reference each other by name in the same batch, e.g.:
+   * Supported dependency formats:
+   * - Positional: "task-1", "task-2", etc. (1-based index in the current batch)
+   * - Existing task IDs: UUIDs of tasks already in the system
+   *
+   * Positional dependency example:
    * [
-   *   { name: "Task A", dependencies: ["Task B"] },
-   *   { name: "Task B" }
+   *   { name: "Task A" },
+   *   { name: "Task B", dependencies: ["task-1"] }
    * ]
    *
+   * Mixed dependency example:
+   * [
+   *   { name: "Task A" },
+   *   { name: "Task B", dependencies: ["<existing-task-id>"] }
+   * ]
+   *
+   * Deduplication:
+   * By default, a task is considered a duplicate if it has the same name, sessionId, and
+   * parentTaskId as an existing task. The default behavior is 'none' (always create). Pass
+   * deduplication: 'skip' (or 'reuse') to return the existing task instead of creating a
+   * duplicate. Pass 'error' to throw when a duplicate exists.
+   *
    * Note: If parentTaskId is provided, it is automatically added to the task's dependencies
-   * to ensure the subtask only becomes ready after the parent is completed. This behavior
-   * maintains backward compatibility - tasks that manually specify dependencies are not affected.
+   * to ensure the subtask only becomes ready after the parent is completed. Subtasks also
+   * inherit sessionId from their parent if they don't specify one.
    */
-  createTasks(tasks: CreateTaskInput[]): Task[] {
-    const createdTasks: Task[] = [];
-    const nameToIdMap = new Map<string, string>();
+  createTasks(
+    tasks: CreateTaskInput[],
+    options: { defaultDeduplication?: import('./types.js').DeduplicationStrategy } = {}
+  ): Task[] {
+    const defaultDeduplication = options.defaultDeduplication || 'none';
+    const resultTasks: Task[] = [];
+    const idMapping = new Map<string, string>(); // Maps input index -> task ID (for positional deps)
 
-    // First pass: Create all tasks without dependencies to establish name-to-ID mapping
-    for (const taskInput of tasks) {
+    // Helper: build a deduplication key from an input
+    const dedupKey = (input: CreateTaskInput): string => {
+      const sessionId = input.sessionId || (input.parentTaskId
+        ? this.state.tasks.get(input.parentTaskId)?.sessionId
+        : undefined) || '__no_session__';
+      return `${input.name.toLowerCase()}|${sessionId}|${input.parentTaskId || '__no_parent__'}`;
+    };
+
+    // Helper: find existing duplicate task
+    const findDuplicate = (input: CreateTaskInput): Task | undefined => {
+      const key = dedupKey(input);
+      for (const task of this.state.tasks.values()) {
+        const taskKey = `${task.name.toLowerCase()}|${task.sessionId || '__no_session__'}|${task.parentTaskId || '__no_parent__'}`;
+        if (taskKey === key) {
+          return task;
+        }
+      }
+      return undefined;
+    };
+
+    // First pass: Deduplicate and create tasks without dependencies
+    for (let i = 0; i < tasks.length; i++) {
+      const taskInput = tasks[i];
+
       // Validate parent task if specified
       if (taskInput.parentTaskId && !this.state.tasks.has(taskInput.parentTaskId)) {
-        throw new Error(`Parent task ${taskInput.parentTaskId} not found`);
+        throw new TaskNotFoundError(taskInput.parentTaskId);
+      }
+
+      // Determine effective deduplication strategy
+      const strategy = taskInput.deduplication || defaultDeduplication;
+
+      // Check for duplicates if strategy is not 'none'
+      if (strategy !== 'none') {
+        const duplicate = findDuplicate(taskInput);
+        if (duplicate) {
+          if (strategy === 'error') {
+            throw new ValidationError(
+              `Duplicate task detected: '${taskInput.name}' already exists in session '${duplicate.sessionId || 'none'}' (ID: ${duplicate.id}). Use deduplication 'skip' to reuse it.`
+            );
+          }
+          // 'skip' or 'reuse': return existing task
+          resultTasks.push(duplicate);
+          idMapping.set(String(i), duplicate.id);
+          continue;
+        }
       }
 
       const id = this.generateId();
       const now = new Date().toISOString();
+
+      // Inherit sessionId from parent if not explicitly provided
+      let sessionId = taskInput.sessionId;
+      if (!sessionId && taskInput.parentTaskId) {
+        const parentTask = this.state.tasks.get(taskInput.parentTaskId);
+        if (parentTask) {
+          sessionId = parentTask.sessionId;
+        }
+      }
 
       const newTask: Task = {
         id,
@@ -234,7 +313,7 @@ export class TaskOrchestratorService {
         externalDependencies: taskInput.externalDependencies,
         conditionalDependencies: taskInput.conditionalDependencies,
         parentTaskId: taskInput.parentTaskId,
-        sessionId: taskInput.sessionId,
+        sessionId,
         metadata: taskInput.metadata,
         maxRetries: taskInput.maxRetries,
         timeoutMs: taskInput.timeoutMs,
@@ -246,52 +325,73 @@ export class TaskOrchestratorService {
 
       // Store the task
       this.state.tasks.set(id, newTask);
-      createdTasks.push(newTask);
-      nameToIdMap.set(taskInput.name, id);
+      resultTasks.push(newTask);
+      idMapping.set(String(i), id);
     }
 
-    // Second pass: Resolve name-based dependencies to actual task IDs
+    // Second pass: Resolve positional dependencies to actual task IDs and validate existing IDs
     for (let i = 0; i < tasks.length; i++) {
       const taskInput = tasks[i];
-      const task = createdTasks[i];
+      const task = resultTasks[i];
 
-      if (taskInput.dependencies && taskInput.dependencies.length > 0) {
-        const resolvedDependencies: string[] = [];
+      if (!taskInput.dependencies || taskInput.dependencies.length === 0) {
+        continue;
+      }
 
-        for (const dep of taskInput.dependencies) {
-          // Check if dependency is a name (not an ID)
-          if (!dep.includes('-') && nameToIdMap.has(dep)) {
-            // It's a name, resolve to ID
-            resolvedDependencies.push(nameToIdMap.get(dep)!);
-          } else if (this.state.tasks.has(dep)) {
-            // It's an existing task ID
-            resolvedDependencies.push(dep);
+      const resolvedDependencies: string[] = [];
+
+      for (const dep of taskInput.dependencies) {
+        // Check if dependency is a positional reference (task-N format)
+        const positionalMatch = dep.match(/^task-(\d+)$/);
+        if (positionalMatch) {
+          const index = parseInt(positionalMatch[1], 10) - 1; // Convert to 0-based index
+          if (index >= 0 && index < tasks.length) {
+            const mappedId = idMapping.get(String(index));
+            if (mappedId) {
+              resolvedDependencies.push(mappedId);
+            } else {
+              throw new DependencyNotFoundError(
+                `Positional dependency '${dep}' references a task that was deduplicated and not created in this batch`
+              );
+            }
           } else {
-            // Dependency not found
-            throw new DependencyNotFoundError(dep);
+            // Out of range positional index
+            throw new DependencyNotFoundError(
+              `Positional dependency '${dep}' is out of range (valid range: task-1 to task-${tasks.length})`
+            );
           }
+        } else if (this.state.tasks.has(dep)) {
+          // Existing task ID reference
+          resolvedDependencies.push(dep);
+        } else {
+          throw new DependencyNotFoundError(
+            `Dependency '${dep}' is not a valid positional reference or existing task ID. Use 'task-N' for a task in this batch, or a valid task ID.`
+          );
         }
-
-        // Update task with resolved dependencies
-        task.dependencies = resolvedDependencies;
-        this.state.tasks.set(task.id, task);
       }
 
-      // Third pass: Automatically add parentTaskId to dependencies if provided (ensures subtask waits for parent)
-      // This is done after name resolution so that if parentTaskId is a name, it would have been resolved above
-      if (task.parentTaskId && !task.dependencies.includes(task.parentTaskId)) {
-        task.dependencies = [...task.dependencies, task.parentTaskId];
-        this.state.tasks.set(task.id, task);
-      }
+      // Update task with resolved dependencies
+      task.dependencies = resolvedDependencies;
+      this.state.tasks.set(task.id, task);
+    }
 
-      // Fourth pass: Check for circular dependencies
+    // Third pass: Check for circular dependencies
+    for (let i = 0; i < resultTasks.length; i++) {
+      const task = resultTasks[i];
       if (task.dependencies && task.dependencies.length > 0) {
         this.checkCircularDependency(task.id, task.dependencies);
+      }
+
+      // Validate all dependency IDs exist in state (defensive)
+      for (const depId of task.dependencies) {
+        if (!this.state.tasks.has(depId)) {
+          throw new DependencyNotFoundError(depId);
+        }
       }
     }
 
     this.triggerSave();
-    return createdTasks;
+    return resultTasks;
   }
 
   /**
@@ -650,6 +750,18 @@ export class TaskOrchestratorService {
   }
 
   /**
+   * Check if a task has incomplete subtasks
+   * @param taskId - Task ID to check
+   * @returns True if task has subtasks that are not completed
+   */
+  private hasIncompleteSubtasks(taskId: string): boolean {
+    const subtasks = this.getSubtasks(taskId);
+    return subtasks.some(subtask => 
+      subtask.status !== TASK_STATUS.COMPLETED && subtask.status !== TASK_STATUS.FAILED
+    );
+  }
+
+  /**
    * Execute a task (mark as completed with result)
    * @param taskId - Task ID to execute
    * @param result - Optional execution result
@@ -658,6 +770,11 @@ export class TaskOrchestratorService {
   executeTask(taskId: string, result?: unknown): Task | null {
     const task = this.state.tasks.get(taskId);
     if (!task) {
+      return null;
+    }
+
+    // Parent tasks cannot complete until all subtasks are complete
+    if (this.hasIncompleteSubtasks(taskId)) {
       return null;
     }
 
@@ -678,6 +795,11 @@ export class TaskOrchestratorService {
   failTask(taskId: string, error: string): Task | null {
     const task = this.state.tasks.get(taskId);
     if (!task) return null;
+
+    // Parent tasks cannot fail until all subtasks are complete or failed
+    if (this.hasIncompleteSubtasks(taskId)) {
+      return null;
+    }
 
     return this.updateTask(taskId, {
       status: TASK_STATUS.FAILED,
@@ -805,6 +927,115 @@ export class TaskOrchestratorService {
       completed: tasks.filter(t => t.status === TASK_STATUS.COMPLETED).length,
       failed: tasks.filter(t => t.status === TASK_STATUS.FAILED).length,
       totalWorkflows: this.state.workflows.size
+    };
+  }
+
+  /**
+   * Clean up hanging, orphaned, or stale tasks.
+   * @param options - Cleanup options
+   * @returns Summary of cleanup actions taken
+   *
+   * Identifies and optionally deletes:
+   * - Orphaned subtasks: tasks with parentTaskId pointing to a non-existent parent
+   * - Parent-completed subtasks: subtasks whose parent is completed but subtasks are still pending
+   * - Duplicate tasks: tasks with the same name/sessionId/parentTaskId as another (keeps oldest)
+   * - Stale pending tasks: pending tasks that have not been started within the given age threshold
+   */
+  cleanupTasks(options: {
+    deleteOrphans?: boolean;
+    deleteParentCompleted?: boolean;
+    deleteDuplicates?: boolean;
+    deleteStalePending?: boolean;
+    stalePendingMs?: number;
+  } = {}): import('./types.js').TaskCleanupResult {
+    const {
+      deleteOrphans = false,
+      deleteParentCompleted = false,
+      deleteDuplicates = false,
+      deleteStalePending = false,
+      stalePendingMs = 24 * 60 * 60 * 1000 // 24 hours default
+    } = options;
+
+    const now = Date.now();
+    const allTasks = this.getAllTasks();
+    const taskIdsToDelete = new Set<string>();
+    const details: import('./types.js').TaskCleanupResult['details'] = [];
+
+    let orphanedSubtasks = 0;
+    let parentCompletedCount = 0;
+    let duplicateTasks = 0;
+    let stalePendingTasks = 0;
+
+    // Find orphaned subtasks and subtasks with completed parents
+    for (const task of allTasks) {
+      if (!task.parentTaskId) continue;
+
+      const parent = this.state.tasks.get(task.parentTaskId);
+      if (!parent) {
+        orphanedSubtasks++;
+        if (deleteOrphans) {
+          taskIdsToDelete.add(task.id);
+          details.push({ id: task.id, name: task.name, reason: 'orphaned_subtask' });
+        }
+        continue;
+      }
+
+      if (parent.status === TASK_STATUS.COMPLETED && task.status === TASK_STATUS.PENDING) {
+        parentCompletedCount++;
+        if (deleteParentCompleted) {
+          taskIdsToDelete.add(task.id);
+          details.push({ id: task.id, name: task.name, reason: 'parent_completed' });
+        }
+      }
+    }
+
+    // Find duplicate tasks: same name, sessionId, parentTaskId (keep oldest createdAt)
+    const seen = new Map<string, Task>();
+    const sortedByAge = [...allTasks].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    for (const task of sortedByAge) {
+      const key = `${task.name.toLowerCase()}|${task.sessionId || '__no_session__'}|${task.parentTaskId || '__no_parent__'}`;
+      if (seen.has(key)) {
+        duplicateTasks++;
+        if (deleteDuplicates) {
+          taskIdsToDelete.add(task.id);
+          details.push({ id: task.id, name: task.name, reason: 'duplicate' });
+        }
+      } else {
+        seen.set(key, task);
+      }
+    }
+
+    // Find stale pending tasks
+    if (deleteStalePending) {
+      for (const task of allTasks) {
+        if (task.status !== TASK_STATUS.PENDING) continue;
+        if (taskIdsToDelete.has(task.id)) continue; // Already scheduled for deletion
+
+        const createdTime = new Date(task.createdAt).getTime();
+        if (now - createdTime > stalePendingMs) {
+          stalePendingTasks++;
+          taskIdsToDelete.add(task.id);
+          details.push({ id: task.id, name: task.name, reason: 'stale_pending' });
+        }
+      }
+    }
+
+    // Delete tasks that are not part of any workflow (extra safety: only delete pending hanging tasks)
+    for (const taskId of taskIdsToDelete) {
+      this.state.tasks.delete(taskId);
+    }
+
+    if (taskIdsToDelete.size > 0) {
+      this.triggerSave();
+    }
+
+    return {
+      deleted: taskIdsToDelete.size,
+      orphanedSubtasks,
+      parentCompleted: parentCompletedCount,
+      stalePendingTasks,
+      duplicateTasks,
+      details
     };
   }
 

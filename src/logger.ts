@@ -119,16 +119,47 @@ export class Logger {
   /**
    * Log MCP tool request
    */
-  async logToolRequest(toolName: string, args: Record<string, unknown>, result: unknown): Promise<void> {
+  async logToolRequest(
+    toolName: string,
+    args: Record<string, unknown>,
+    result: unknown,
+    llmContext?: {
+      llmMessage?: string;
+      sessionId?: string;
+    }
+  ): Promise<void> {
     const entry: LogEntry = {
       timestamp: new Date().toISOString(),
+      type: 'tool_request',
       tool: toolName,
       arguments: args,
-      result
+      result,
+      sessionId: llmContext?.sessionId
     };
 
     await this.writeToFile(entry);
-    this.debug(`Tool executed: ${toolName}`, { args, result });
+    this.debug(`Tool executed: ${toolName}`, { args, result, sessionId: llmContext?.sessionId });
+  }
+
+  /**
+   * Log LLM response with tool calls
+   */
+  async logLLMResponse(
+    message: string,
+    toolCalls?: any[],
+    metadata?: Record<string, unknown>
+  ): Promise<void> {
+    const entry: LogEntry = {
+      timestamp: new Date().toISOString(),
+      type: 'llm_response',
+      content: message,
+      toolCalls,
+      relatedTools: toolCalls?.map((tc: any) => tc.function?.name).filter(Boolean),
+      sessionId: metadata?.sessionId as string | undefined
+    };
+
+    await this.writeToFile(entry);
+    this.debug('LLM response logged', { messageLength: message.length, toolCalls: toolCalls?.length });
   }
 
   /**

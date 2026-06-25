@@ -74,7 +74,7 @@ class TaskOrchestratorMCPServer {
         tools: [
           {
             name: 'create_tasks',
-            description: 'Create one or more tasks with optional dependencies and parent tasks. IMPORTANT: For new independent task groups/sessions, strongly prefer using create_workflow instead to keep tasks organized. When creating tasks outside a workflow context, always include a meaningful sessionId in metadata (e.g., "bugfix-123", "feature-auth", "session-2024-06-24") to group related tasks together. This enables better task organization, session isolation, and cleanup.',
+            description: 'Create one or more tasks with optional dependencies and parent tasks. IMPORTANT: For new independent task groups/sessions, strongly prefer using create_workflow instead to keep tasks organized and avoid hanging tasks. When creating tasks outside a workflow context, always include a meaningful sessionId (top-level field, e.g., "bugfix-123", "feature-auth") to group related tasks together. Subtasks created with parentTaskId automatically inherit sessionId from their parent. Duplicate tasks are skipped by default (use deduplication: "none" per task to force creation). CRITICAL: Positional references (task-1, task-2, etc.) ONLY work for dependencies within the same batch. For parentTaskId, you MUST use actual existing task IDs - create the parent task first, get its ID from the response, then create subtasks using that ID. Do not use positional references for parentTaskId.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -96,19 +96,28 @@ class TaskOrchestratorMCPServer {
                         items: {
                           type: 'string'
                         },
-                        description: 'Array of task IDs that this task depends on'
+                        description: 'Array of task IDs or positional references (task-1, task-2...) that this task depends on'
                       },
                       parentTaskId: {
                         type: 'string',
-                        description: 'Optional parent task ID for creating subtasks'
+                        description: 'Optional parent task ID for creating subtasks. Subtasks inherit sessionId from parent. CRITICAL: Must be an actual existing task ID, NOT a positional reference (task-1, task-2). Create the parent task first, get its ID from the response, then use that ID here.'
+                      },
+                      sessionId: {
+                        type: 'string',
+                        description: 'Optional session ID for grouping related tasks (top-level field, e.g., "feature-auth")'
                       },
                       metadata: {
                         type: 'object',
-                        description: 'Optional metadata for the task. Include sessionId here to group related tasks (e.g., { "sessionId": "feature-auth" })'
+                        description: 'Optional metadata for the task'
                       },
                       maxRetries: {
                         type: 'number',
                         description: 'Maximum number of retry attempts for this task'
+                      },
+                      deduplication: {
+                        type: 'string',
+                        enum: ['skip', 'reuse', 'error', 'none'],
+                        description: 'How to handle duplicate tasks (same name/sessionId/parent). Default is skip.'
                       }
                     },
                     required: ['name']
@@ -481,6 +490,35 @@ class TaskOrchestratorMCPServer {
                 }
               }
             }
+          },
+          {
+            name: 'cleanup_tasks',
+            description: 'Identify and optionally delete hanging/orphaned tasks: orphaned subtasks (parent missing), subtasks left pending after parent completed, duplicate tasks, and stale pending tasks. Use this to maintain storage health when LLM-driven task creation leaves incomplete or duplicate tasks behind.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                deleteOrphans: {
+                  type: 'boolean',
+                  description: 'Delete subtasks whose parent task no longer exists'
+                },
+                deleteParentCompleted: {
+                  type: 'boolean',
+                  description: 'Delete subtasks that are still pending after their parent completed'
+                },
+                deleteDuplicates: {
+                  type: 'boolean',
+                  description: 'Delete duplicate tasks (same name/sessionId/parentTaskId), keeping the oldest'
+                },
+                deleteStalePending: {
+                  type: 'boolean',
+                  description: 'Delete pending tasks that have not been started for a long time'
+                },
+                stalePendingMs: {
+                  type: 'number',
+                  description: 'Age threshold in milliseconds for stale pending tasks (default 24 hours)'
+                }
+              }
+            }
           }
         ]
       };
@@ -488,6 +526,24 @@ class TaskOrchestratorMCPServer {
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
+
+      // Extract sessionId from args if available for logging
+      let sessionId: string | undefined;
+      if (args && typeof args === 'object') {
+        const tasks = (args as any).tasks;
+        if (Array.isArray(tasks) && tasks.length > 0) {
+          sessionId = tasks[0]?.metadata?.sessionId;
+        }
+        if (!sessionId) {
+          sessionId = (args as any).metadata?.sessionId;
+        }
+      }
+
+      // Log LLM response if available (MCP SDK doesn't provide this directly,
+      // but we can log the tool call context)
+      if (sessionId) {
+        this.logger.debug(`Tool call with sessionId: ${name}`, { tool: name, sessionId });
+      }
 
       const handler = handlerRegistry[name];
       if (!handler) {
@@ -511,8 +567,8 @@ class TaskOrchestratorMCPServer {
         };
         return await handler(context, args || {});
       } catch (error) {
-        this.logger.error(`Error executing tool ${name}`, { error });
-        
+        this.logger.error(`Error executing tool ${name}`, { error, sessionId });
+
         if (error instanceof ZodError) {
           return {
             content: [
@@ -526,7 +582,7 @@ class TaskOrchestratorMCPServer {
             ]
           };
         }
-        
+
         if (error instanceof SequentialError) {
           return {
             content: [
@@ -540,7 +596,7 @@ class TaskOrchestratorMCPServer {
             ]
           };
         }
-        
+
         return {
           content: [
             {
@@ -561,10 +617,22 @@ class TaskOrchestratorMCPServer {
   async run() {
     // Initialize storage adapter and load state (blocking)
     await this.initializeAsync();
-    
+
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
     this.logger.info('Task Orchestrator MCP server running on stdio');
+  }
+
+  /**
+   * Log LLM response externally (for debugging LLM → Agent interactions)
+   * This can be called from outside the MCP server to log LLM messages
+   */
+  async logLLMResponse(
+    message: string,
+    toolCalls?: any[],
+    metadata?: Record<string, unknown>
+  ): Promise<void> {
+    await this.logger.logLLMResponse(message, toolCalls, metadata);
   }
 }
 

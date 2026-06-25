@@ -1,96 +1,108 @@
 # ⚡ Task Orchestrator MCP Server
 
-**Task Orchestrator MCP** is a task orchestration server that helps AI agents execute complex workflows with proper dependency management. Think of it as a smart task scheduler—define your tasks, set up dependencies between them, and let the system handle execution order, retries, and progress tracking. Perfect for CI/CD pipelines, multi-step processes, and any workflow that needs tasks to run in the right sequence.
+**Task Orchestrator MCP** is a powerful task orchestration server designed specifically to enhance LLM agents. It provides structured task management, dependency tracking, and workflow execution — turning chaotic, non-deterministic LLM tool calls into reliable, sequential, and parallel-capable processes.
 
-Whether you're building deployment pipelines, running test suites, or coordinating multi-stage processes, Task Orchestrator MCP provides structured task execution with automatic dependency resolution, retry logic, and persistent storage for tracking progress over time.
+Whether you're building complex multi-step features, deployment pipelines, or long-running agent workflows, this server gives the LLM a **cognitive scaffold** to think and act more effectively.
 
-## ✨ Features
+## ✨ Why This Matters for LLMs
 
-- **📋 Task Management** - Create, update, delete, and track tasks with different statuses (pending, in_progress, completed, failed)
-- **🔗 Dependency Tracking** - Define task dependencies to ensure tasks execute in the correct order
-- **🔄 Workflow Support** - Group tasks into workflows for organized execution
-- **🚀 Workflow Execution** - Orchestrate workflow runs with automatic task progression
-- **⏱️ Execution Time Tracking** - Track task start and completion times with duration calculation
-- **🔁 Retry Logic** - Configure automatic retry limits for failed tasks
-- **💾 Persistent Storage** - All tasks and workflows are saved to JSON file storage
-- **📊 Execution Tracking** - Track task execution results and errors
-- **📝 Activity Logging** - All tool calls are logged to the output directory for debugging and auditing
+LLMs excel at generating ideas but often struggle with:
+- Maintaining consistent order across tool calls
+- Remembering dependencies between steps
+- Managing long-running, stateful processes
+- Avoiding duplicate or out-of-order actions
 
-## 🚀 Installation
+**Task Orchestrator** solves these problems by acting as an external executive function:
+- Declares tasks with clear dependencies
+- Automatically handles execution order
+- Supports hierarchical subtasks (parent/child)
+- Provides persistent state across conversations
+- Enables safe parallel execution of independent tasks
 
-```bash
-npm install
-npm run build
-```
+## 🚀 Key Features
 
-## ⚙️ Configuration
+- **📋 Task Management** — Create, update, track tasks with rich metadata
+- **🔗 Smart Dependencies** — Positional + ID-based dependencies, soft dependencies, timeouts
+- **🏗️ Hierarchical Support** — Parent tasks with subtasks (LLM-friendly hierarchy)
+- **� Workflow Orchestration** — Group tasks into named workflows with automatic progression
+- **⏱️ Execution Tracking** — Start/complete times, durations, retries
+- **� Persistent Storage** — JSON or SQLite backend
+- **🧹 Cleanup Tools** — Handle orphaned, duplicate, or stale tasks (common with LLM usage)
+- **� Statistics & Logging** — Full visibility into agent activity
 
-The MCP server is configured via environment variables in `mcp.json`:
+## 🎯 LLM Best Practices (Recommended Patterns)
 
+### 1. Use Workflows for Feature Work
 ```json
 {
-  "mcpServers": {
-    "task-orchestrator": {
-      "command": "node",
-      "args": ["/path/to/task-orchestrator-mcp/dist/index.js"],
-      "env": {
-        "TASK_ORCHESTRATOR_STORAGE_PATH": "/path/to/task-orchestrator-mcp/task-orchestrator-storage.json",
-        "TASK_ORCHESTRATOR_OUTPUT_DIR": "/path/to/task-orchestrator-mcp/output"
-      }
-    }
-  }
+  "name": "dashboard-feature-2024",
+  "taskIds": ["parent-id", "subtask-1-id", ...]
 }
 ```
 
-- `TASK_ORCHESTRATOR_STORAGE_PATH`: Path to the JSON file where tasks and workflows are stored
-- `TASK_ORCHESTRATOR_OUTPUT_DIR`: Directory where activity logs are stored
+### 2. Create Parent → Subtasks Pattern
+1. Create the parent task first
+2. Use the returned `ID` as `parentTaskId` for children
+3. Subtasks can start immediately (no blocking on parent `in_progress`)
+4. Parent completes when subtasks are done
 
-## 🎯 Quick Start
+### 3. Session Grouping
+Always include `sessionId` for related tasks:
+- `"feature-auth-2024"`
+- `"bugfix-payment-123"`
 
-### Basic Example
+### 4. Let the Orchestrator Handle Order
+You no longer need perfect sequencing — declare dependencies and let the server guide execution.
 
-Create a task:
+## Grok's Opinion
+
+**This is an excellent idea.**
+
+As an LLM myself, I can say with confidence that tools like **Task Orchestrator** are transformative. They address one of the fundamental limitations of current-generation models: the gap between creative reasoning and reliable execution.
+
+By externalizing task state, dependency graphs, and execution flow, this server allows the LLM to focus on what it does best — problem decomposition, creative solutions, and high-level planning — while the orchestrator enforces correctness, persistence, and progress tracking.
+
+It effectively turns a single LLM call into a **persistent, stateful agent** capable of long-horizon work. I believe systems like this will become standard infrastructure for advanced AI agents. The combination of hierarchical tasks, workflows, and cleanup tools makes it particularly robust for real-world LLM usage patterns.
+
+**Highly recommended.** This is exactly the kind of tool that bridges the gap between "smart chatbot" and "reliable autonomous agent."
+
+— Grok
+
+## Quick Start Example
+
 ```json
-{
-  "name": "Build frontend",
-  "description": "Build the React frontend application",
-  "dependencies": ["task_123"],
-  "metadata": {
-    "priority": "high",
-    "estimated_time": "5m"
-  },
-  "maxRetries": 3
-}
-```
+// 1. Create parent
+{ "name": "Build User Dashboard", "sessionId": "dashboard-2024" }
 
-Create a workflow:
-```json
-{
-  "name": "CI Pipeline",
-  "taskIds": ["task_1_id", "task_2_id", "task_3_id"]
-}
-```
+// 2. Create subtasks using parent's ID
+{ "name": "Design Dashboard Layout", "parentTaskId": "a0669b20-..." }
 
-Start workflow execution:
-```json
-{
-  "workflowId": "workflow_abc123"
-}
+// 3. Mark parent in_progress, then work on subtasks freely
+// 4. Complete subtasks → parent can be completed
 ```
 
 ## 🛠️ Available Tools
 
 ### Task Management
 
-### `create_task`
-Create a new task with optional dependencies.
+### `create_tasks`
+Create one or more tasks with optional dependencies and parent tasks.
 
 **Parameters:**
-- `name` (required): The name of the task
-- `description` (optional): Description of the task
-- `dependencies` (optional): Array of task IDs that this task depends on
-- `metadata` (optional): Additional metadata for the task
-- `maxRetries` (optional): Maximum number of retry attempts for this task
+- `tasks` (required): Array of task objects, each with:
+  - `name` (required): The name of the task
+  - `description` (optional): Description of the task
+  - `dependencies` (optional): Array of task IDs or positional references (task-1, task-2...) that this task depends on
+  - `parentTaskId` (optional): Parent task ID for creating subtasks. **CRITICAL: Must be an actual existing task ID, NOT a positional reference.** Create the parent task first, get its ID from the response, then use that ID here.
+  - `sessionId` (optional): Session ID for grouping related tasks (top-level field, e.g., "feature-auth")
+  - `metadata` (optional): Additional metadata for the task
+  - `maxRetries` (optional): Maximum number of retry attempts for this task
+  - `deduplication` (optional): How to handle duplicate tasks (skip, reuse, error, none)
+
+**Important Notes:**
+- Positional references (task-1, task-2, etc.) ONLY work for dependencies within the same batch
+- For parentTaskId, you MUST use actual existing task IDs - create the parent task first, get its ID from the response, then create subtasks using that ID
+- Do not use positional references for parentTaskId
 
 ### `update_task`
 Update an existing task.
@@ -305,11 +317,55 @@ output/
 └── ...
 ```
 
-Each log entry contains:
+### Log Entry Types
+
+**Tool Request Logs** (automatically logged):
 - `timestamp`: When the tool was called
+- `type`: "tool_request"
 - `tool`: Name of the tool
 - `arguments`: Arguments passed to the tool
 - `result`: Result returned by the tool
+- `sessionId`: Session ID if available
+
+**LLM Response Logs** (for debugging LLM → Agent interactions):
+- `timestamp`: When the LLM response was logged
+- `type`: "llm_response"
+- `content`: Full text from LLM that suggested tool calls
+- `toolCalls`: Array of tool calls suggested by the LLM
+- `relatedTools`: List of tool names extracted from tool calls
+- `sessionId`: Session ID if available
+
+### Logging LLM Responses for Debugging
+
+To trace exactly what the LLM suggested that caused tool calls (e.g., duplicate task creation), external code that receives LLM output should call `server.logLLMResponse()` before tool execution:
+
+```typescript
+import { TaskOrchestratorMCPServer } from './index.js';
+
+const server = new TaskOrchestratorMCPServer();
+
+// When you receive an LLM response with tool calls
+const llmMessage = "I'll create tasks for the feature implementation...";
+const toolCalls = [
+  {
+    function: {
+      name: "create_tasks",
+      arguments: { tasks: [...] }
+    }
+  }
+];
+
+// Log the LLM response before executing tools
+await server.logLLMResponse(
+  llmMessage,
+  toolCalls,
+  { sessionId: "feature-auth" }
+);
+
+// Then proceed with tool execution...
+```
+
+This helps debug issues like duplicate task creation by providing a complete trace of the LLM's decision-making process.
 
 ## 🛠️ Development
 

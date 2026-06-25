@@ -186,60 +186,181 @@ for (const testCase of testCases) {
         });
       });
 
-      it('should resolve name-based dependencies within batch', () => {
+      it('should throw error for name-based dependencies', () => {
         const tasks = [
           { name: 'Task A', dependencies: ['Task B'] },
-          { name: 'Task B' },
-          { name: 'Task C', dependencies: ['Task A', 'Task B'] }
+          { name: 'Task B' }
+        ];
+
+        assert.throws(() => {
+          service.createTasks(tasks);
+        }, /not a valid positional reference/);
+      });
+
+      it('should support UUID-based dependencies referencing existing tasks', () => {
+        const existingTask = service.createTask({ name: 'Existing Task' });
+
+        const tasks = [
+          { name: 'Task A', dependencies: [existingTask.id] }
+        ];
+
+        const created = service.createTasks(tasks);
+        assert.strictEqual(created.length, 1);
+        assert.strictEqual(created[0].dependencies.length, 1);
+        assert.strictEqual(created[0].dependencies[0], existingTask.id);
+      });
+
+      it('should throw error for dependencies that are neither positional nor existing IDs', () => {
+        const tasks = [
+          { name: 'Task A', dependencies: ['not-a-task-id'] }
+        ];
+
+        assert.throws(() => {
+          service.createTasks(tasks);
+        }, /not a valid positional reference or existing task ID/);
+      });
+
+      it('should resolve positional dependencies (task-1, task-2, etc.)', () => {
+        const tasks = [
+          { name: 'Task A' },
+          { name: 'Task B', dependencies: ['task-1'] },
+          { name: 'Task C', dependencies: ['task-2'] }
         ];
 
         const created = service.createTasks(tasks);
         assert.strictEqual(created.length, 3);
 
-        // Task A should have Task B as dependency (resolved by name)
-        const taskA = created.find(t => t.name === 'Task A');
-        assert.ok(taskA);
-        assert.strictEqual(taskA?.dependencies.length, 1);
+        // Task B should depend on Task A (task-1)
         const taskB = created.find(t => t.name === 'Task B');
         assert.ok(taskB);
-        assert.strictEqual(taskA?.dependencies[0], taskB?.id);
+        assert.strictEqual(taskB?.dependencies.length, 1);
+        assert.strictEqual(taskB?.dependencies[0], created[0].id);
 
-        // Task C should have both Task A and Task B as dependencies
+        // Task C should depend on Task B (task-2)
         const taskC = created.find(t => t.name === 'Task C');
         assert.ok(taskC);
-        assert.strictEqual(taskC?.dependencies.length, 2);
-        assert.ok(taskC?.dependencies.includes(taskA!.id));
-        assert.ok(taskC?.dependencies.includes(taskB!.id));
+        assert.strictEqual(taskC?.dependencies.length, 1);
+        assert.strictEqual(taskC?.dependencies[0], created[1].id);
       });
 
-      it('should support mixed name and ID dependencies in batch', () => {
-        // First create an existing task
-        const existingTask = service.createTask({ name: 'Existing Task' });
-
+      it('should support multiple positional dependencies', () => {
         const tasks = [
-          { name: 'Task A', dependencies: ['Task B', existingTask.id] },
-          { name: 'Task B' }
+          { name: 'Task A' },
+          { name: 'Task B' },
+          { name: 'Task C', dependencies: ['task-1', 'task-2'] }
         ];
 
         const created = service.createTasks(tasks);
-        const taskA = created.find(t => t.name === 'Task A');
-        const taskB = created.find(t => t.name === 'Task B');
+        const taskC = created.find(t => t.name === 'Task C');
 
-        assert.ok(taskA);
-        assert.strictEqual(taskA?.dependencies.length, 2);
-        assert.ok(taskA?.dependencies.includes(taskB!.id)); // Name-based
-        assert.ok(taskA?.dependencies.includes(existingTask.id)); // ID-based
+        assert.ok(taskC);
+        assert.strictEqual(taskC?.dependencies.length, 2);
+        assert.ok(taskC?.dependencies.includes(created[0].id));
+        assert.ok(taskC?.dependencies.includes(created[1].id));
       });
 
-      it('should detect circular dependencies in name-based batch', () => {
+      it('should throw error for out-of-range positional index', () => {
         const tasks = [
-          { name: 'Task A', dependencies: ['Task B'] },
-          { name: 'Task B', dependencies: ['Task A'] }
+          { name: 'Task A' },
+          { name: 'Task B', dependencies: ['task-5'] }
+        ];
+
+        assert.throws(() => {
+          service.createTasks(tasks);
+        }, /Positional dependency 'task-5' is out of range/);
+      });
+
+      it('should throw error for invalid positional index (zero)', () => {
+        const tasks = [
+          { name: 'Task A' },
+          { name: 'Task B', dependencies: ['task-0'] }
+        ];
+
+        assert.throws(() => {
+          service.createTasks(tasks);
+        }, /Positional dependency 'task-0' is out of range/);
+      });
+
+      it('should detect circular dependencies with positional references', () => {
+        const tasks = [
+          { name: 'Task A', dependencies: ['task-2'] },
+          { name: 'Task B', dependencies: ['task-1'] }
         ];
 
         assert.throws(() => {
           service.createTasks(tasks);
         }, /Circular dependency detected/);
+      });
+
+      it('should support complex DAG with positional dependencies', () => {
+        const tasks = [
+          { name: 'Task A' },
+          { name: 'Task B' },
+          { name: 'Task C', dependencies: ['task-1'] },
+          { name: 'Task D', dependencies: ['task-2'] },
+          { name: 'Task E', dependencies: ['task-3', 'task-4'] }
+        ];
+
+        const created = service.createTasks(tasks);
+        const taskE = created.find(t => t.name === 'Task E');
+
+        assert.ok(taskE);
+        assert.strictEqual(taskE?.dependencies.length, 2);
+        assert.ok(taskE?.dependencies.includes(created[2].id)); // Task C
+        assert.ok(taskE?.dependencies.includes(created[3].id)); // Task D
+      });
+
+      it('should skip duplicate tasks when deduplication is skip', () => {
+        service.createTasks([{ name: 'Task A', sessionId: 'session-1' }]);
+
+        const created = service.createTasks(
+          [{ name: 'Task A', sessionId: 'session-1' }],
+          { defaultDeduplication: 'skip' }
+        );
+
+        assert.strictEqual(created.length, 1);
+        assert.strictEqual(service.getAllTasks().filter(t => t.name === 'Task A').length, 1);
+      });
+
+      it('should error on duplicate tasks when deduplication is error', () => {
+        service.createTasks([{ name: 'Task A', sessionId: 'session-1' }]);
+
+        assert.throws(() => {
+          service.createTasks(
+            [{ name: 'Task A', sessionId: 'session-1' }],
+            { defaultDeduplication: 'error' }
+          );
+        }, /Duplicate task detected/);
+      });
+
+      it('should create duplicates when deduplication is none', () => {
+        service.createTasks([{ name: 'Task A', sessionId: 'session-1' }]);
+
+        const created = service.createTasks(
+          [{ name: 'Task A', sessionId: 'session-1' }],
+          { defaultDeduplication: 'none' }
+        );
+
+        assert.strictEqual(created.length, 1);
+        assert.strictEqual(service.getAllTasks().filter(t => t.name === 'Task A').length, 2);
+      });
+
+      it('should inherit sessionId from parent when creating subtasks', () => {
+        const parent = service.createTask({ name: 'Parent', sessionId: 'parent-session' });
+        const child = service.createTasks(
+          [{ name: 'Child', parentTaskId: parent.id }]
+        );
+
+        assert.strictEqual(child[0].sessionId, 'parent-session');
+      });
+
+      it('should allow explicit sessionId to override parent sessionId', () => {
+        const parent = service.createTask({ name: 'Parent', sessionId: 'parent-session' });
+        const child = service.createTasks(
+          [{ name: 'Child', parentTaskId: parent.id, sessionId: 'child-session' }]
+        );
+
+        assert.strictEqual(child[0].sessionId, 'child-session');
       });
     });
 
@@ -392,6 +513,57 @@ for (const testCase of testCases) {
         assert.strictEqual(canExecute.canExecute, false);
         assert.ok(canExecute.reason);
       });
+
+      it('should not complete parent while subtasks are incomplete', () => {
+        const parentTask = service.createTask({ name: 'Parent Task' });
+        const subtask1 = service.createTask({ name: 'Subtask 1', parentTaskId: parentTask.id });
+        const subtask2 = service.createTask({ name: 'Subtask 2', parentTaskId: parentTask.id });
+
+        // Try to complete parent while subtasks are still pending - should fail
+        const executed = service.executeTask(parentTask.id);
+        assert.strictEqual(executed, null);
+
+        // Complete one subtask
+        service.executeTask(subtask1.id);
+
+        // Parent still cannot complete (one subtask still incomplete)
+        const executedAfterOne = service.executeTask(parentTask.id);
+        assert.strictEqual(executedAfterOne, null);
+
+        // Complete second subtask
+        service.executeTask(subtask2.id);
+
+        // Now parent can complete
+        const executedAfterAll = service.executeTask(parentTask.id);
+        assert.ok(executedAfterAll);
+        assert.strictEqual(executedAfterAll?.status, TASK_STATUS.COMPLETED);
+      });
+
+      it('should allow parent to complete after all subtasks are completed', () => {
+        const parentTask = service.createTask({ name: 'Parent Task' });
+        const subtask = service.createTask({ name: 'Subtask', parentTaskId: parentTask.id });
+
+        // Complete subtask first
+        service.executeTask(subtask.id);
+
+        // Parent should now be able to complete
+        const executed = service.executeTask(parentTask.id);
+        assert.ok(executed);
+        assert.strictEqual(executed?.status, TASK_STATUS.COMPLETED);
+      });
+
+      it('should allow parent to complete after all subtasks are failed', () => {
+        const parentTask = service.createTask({ name: 'Parent Task' });
+        const subtask = service.createTask({ name: 'Subtask', parentTaskId: parentTask.id });
+
+        // Fail subtask
+        service.failTask(subtask.id, 'Subtask failed');
+
+        // Parent should now be able to complete (subtask is failed, not incomplete)
+        const executed = service.executeTask(parentTask.id);
+        assert.ok(executed);
+        assert.strictEqual(executed?.status, TASK_STATUS.COMPLETED);
+      });
     });
 
     describe('failTask', () => {
@@ -407,6 +579,23 @@ for (const testCase of testCases) {
       it('should return null for non-existent task', () => {
         const failed = service.failTask('non-existent-id', 'Error');
         assert.strictEqual(failed, null);
+      });
+
+      it('should not fail parent while subtasks are incomplete', () => {
+        const parentTask = service.createTask({ name: 'Parent Task' });
+        const subtask = service.createTask({ name: 'Subtask', parentTaskId: parentTask.id });
+
+        // Try to fail parent while subtask is still pending - should fail
+        const failed = service.failTask(parentTask.id, 'Parent failed');
+        assert.strictEqual(failed, null);
+
+        // Complete subtask
+        service.executeTask(subtask.id);
+
+        // Now parent can fail
+        const failedAfterSubtask = service.failTask(parentTask.id, 'Parent failed');
+        assert.ok(failedAfterSubtask);
+        assert.strictEqual(failedAfterSubtask?.status, TASK_STATUS.FAILED);
       });
     });
 
@@ -425,6 +614,43 @@ for (const testCase of testCases) {
 
         const inProgress = service.markTaskInProgress(task2.id);
         assert.strictEqual(inProgress, null);
+      });
+
+      it('should allow subtask to start while parent is in progress', () => {
+        // Subtasks can now start independently of parent status
+        const parentTask = service.createTask({ name: 'Parent Task' });
+        const subtask = service.createTask({ name: 'Subtask', parentTaskId: parentTask.id });
+
+        // Mark parent as in progress
+        const parentInProgress = service.markTaskInProgress(parentTask.id);
+        assert.ok(parentInProgress);
+        assert.strictEqual(parentInProgress?.status, TASK_STATUS.IN_PROGRESS);
+
+        // Subtask should now be able to start even while parent is in progress
+        const subtaskInProgress = service.markTaskInProgress(subtask.id);
+        assert.ok(subtaskInProgress);
+        assert.strictEqual(subtaskInProgress?.status, TASK_STATUS.IN_PROGRESS);
+
+        // Verify subtask does NOT have parent in dependencies
+        assert.ok(!subtask.dependencies.includes(parentTask.id));
+      });
+
+      it('should allow subtask to start even if parent is pending', () => {
+        const parentTask = service.createTask({ name: 'Parent Task' });
+        const subtask = service.createTask({ name: 'Subtask', parentTaskId: parentTask.id });
+
+        // Subtask should be able to start even while parent is still pending
+        const subtaskInProgress = service.markTaskInProgress(subtask.id);
+        assert.ok(subtaskInProgress);
+        assert.strictEqual(subtaskInProgress?.status, TASK_STATUS.IN_PROGRESS);
+      });
+
+      it('should NOT auto-add parent to dependencies when creating subtask', () => {
+        const parentTask = service.createTask({ name: 'Parent Task' });
+        const subtask = service.createTask({ name: 'Subtask', parentTaskId: parentTask.id });
+
+        // Verify subtask does NOT have parent in its dependencies
+        assert.ok(!subtask.dependencies.includes(parentTask.id));
       });
     });
 
@@ -896,6 +1122,89 @@ for (const testCase of testCases) {
         assert.throws(() => {
           service.getTaskWithSubtasks('non-existent-id');
         });
+      });
+    });
+
+    describe('cleanupTasks', () => {
+      it('should detect orphaned subtasks without deleting by default', () => {
+        const parent = service.createTask({ name: 'Parent' });
+        const child = service.createTask({ name: 'Child', parentTaskId: parent.id });
+        service.deleteTask(parent.id);
+
+        const result = service.cleanupTasks();
+        assert.strictEqual(result.orphanedSubtasks, 1);
+        assert.strictEqual(result.deleted, 0);
+        assert.ok(service.getTask(child.id));
+      });
+
+      it('should delete orphaned subtasks when deleteOrphans is true', () => {
+        const parent = service.createTask({ name: 'Parent' });
+        const child = service.createTask({ name: 'Child', parentTaskId: parent.id });
+        service.deleteTask(parent.id);
+
+        const result = service.cleanupTasks({ deleteOrphans: true });
+        assert.strictEqual(result.orphanedSubtasks, 1);
+        assert.strictEqual(result.deleted, 1);
+        assert.strictEqual(service.getTask(child.id), undefined);
+      });
+
+      it('should detect duplicate tasks', () => {
+        service.createTask({ name: 'Dup', sessionId: 's1' });
+        service.createTask({ name: 'Dup', sessionId: 's1' });
+
+        const result = service.cleanupTasks();
+        assert.strictEqual(result.duplicateTasks, 1);
+        assert.strictEqual(result.deleted, 0);
+      });
+
+      it('should delete duplicate tasks keeping oldest', () => {
+        const first = service.createTask({ name: 'Dup', sessionId: 's1' });
+        service.createTask({ name: 'Dup', sessionId: 's1' });
+
+        const result = service.cleanupTasks({ deleteDuplicates: true });
+        assert.strictEqual(result.duplicateTasks, 1);
+        assert.strictEqual(result.deleted, 1);
+        assert.ok(service.getTask(first.id));
+        assert.strictEqual(service.getAllTasks().filter(t => t.name === 'Dup').length, 1);
+      });
+
+      it('should not detect parent-completed pending subtasks (new behavior)', () => {
+        // With new behavior, parents cannot complete while subtasks are pending
+        const parent = service.createTask({ name: 'Parent' });
+        const child = service.createTask({ name: 'Child', parentTaskId: parent.id });
+        
+        // Try to complete parent - should fail due to incomplete subtask
+        const executed = service.executeTask(parent.id);
+        assert.strictEqual(executed, null);
+
+        const result = service.cleanupTasks();
+        // No parent-completed subtasks since parent cannot complete
+        assert.strictEqual(result.parentCompleted, 0);
+      });
+
+      it('should detect parent-completed only after subtasks complete', () => {
+        const parent = service.createTask({ name: 'Parent' });
+        const child = service.createTask({ name: 'Child', parentTaskId: parent.id });
+        
+        // Complete subtask first
+        service.executeTask(child.id);
+        
+        // Now parent can complete
+        service.executeTask(parent.id);
+
+        const result = service.cleanupTasks();
+        // Parent is completed, but subtask is also completed (not pending)
+        assert.strictEqual(result.parentCompleted, 0);
+      });
+
+      it('should count stale pending tasks', async () => {
+        const task = service.createTask({ name: 'Stale' });
+        // Manually set createdAt to old time
+        service.updateTask(task.id, { createdAt: new Date(Date.now() - 100000).toISOString() });
+
+        const result = service.cleanupTasks({ deleteStalePending: true, stalePendingMs: 1000 });
+        assert.strictEqual(result.stalePendingTasks, 1);
+        assert.strictEqual(result.deleted, 1);
       });
     });
   });

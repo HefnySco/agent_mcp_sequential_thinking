@@ -61,6 +61,11 @@ export interface Task {
 }
 
 /**
+ * Deduplication strategy for task creation
+ */
+export type DeduplicationStrategy = 'skip' | 'reuse' | 'error' | 'none';
+
+/**
  * Task creation input (without auto-generated fields)
  */
 export interface CreateTaskInput {
@@ -76,6 +81,14 @@ export interface CreateTaskInput {
   metadata?: Record<string, unknown>;
   maxRetries?: number;
   timeoutMs?: number;
+  /**
+   * Deduplication strategy for this task:
+   * - 'skip': If a duplicate exists, skip creation and return existing task
+   * - 'reuse': Same as skip (alias for clarity)
+   * - 'error': If a duplicate exists, throw an error
+   * - 'none': Always create a new task (default historical behavior)
+   */
+  deduplication?: DeduplicationStrategy;
 }
 
 /**
@@ -95,6 +108,7 @@ export interface UpdateTaskInput {
   metadata?: Record<string, unknown>;
   result?: unknown;
   error?: string;
+  createdAt?: string;
   startedAt?: string;
   completedAt?: string;
   retries?: number;
@@ -174,6 +188,22 @@ export interface TaskStats {
 }
 
 /**
+ * Result of a task cleanup operation
+ */
+export interface TaskCleanupResult {
+  deleted: number;
+  orphanedSubtasks: number;
+  parentCompleted: number;
+  stalePendingTasks: number;
+  duplicateTasks: number;
+  details: Array<{
+    id: string;
+    name: string;
+    reason: 'orphaned_subtask' | 'stale_pending' | 'duplicate' | 'parent_completed';
+  }>;
+}
+
+/**
  * Storage backend type
  */
 export type StorageBackend = 'json' | 'sqlite';
@@ -194,7 +224,12 @@ export interface SequentialConfig {
  */
 export interface LogEntry {
   timestamp: string;
-  tool: string;
-  arguments: Record<string, unknown>;
-  result: unknown;
+  type: 'tool_request' | 'llm_response';
+  tool?: string;
+  arguments?: Record<string, unknown>;
+  result?: unknown;
+  content?: string;
+  toolCalls?: any[];
+  relatedTools?: string[];
+  sessionId?: string;
 }

@@ -24,7 +24,8 @@ import {
   AdvanceWorkflowRunSchema,
   GetWorkflowRunSchema,
   GetNextWorkflowTasksSchema,
-  CleanupWorkflowRunsSchema
+  CleanupWorkflowRunsSchema,
+  CleanupTasksSchema
 } from './validation.js';
 import { ERROR_MESSAGES } from './constants.js';
 
@@ -48,7 +49,49 @@ export async function handleCreateTasks(
   // Validate input
   const validated = CreateTasksSchema.parse(args);
 
-  const tasks = service.createTasks(validated.tasks);
+  // Convert null values to undefined for optional fields
+  const normalizedTasks = validated.tasks.map(task => ({
+    ...task,
+    parentTaskId: task.parentTaskId ?? undefined,
+    sessionId: task.sessionId ?? undefined,
+    description: task.description ?? undefined,
+    deduplication: task.deduplication ?? undefined
+  }));
+
+  // Determine the batch sessionId from top-level sessionId (not metadata) for logging
+  const sessionId = normalizedTasks[0]?.sessionId as string | undefined;
+
+  // Check for duplicate task names within each sessionId (pre-creation advisory warning)
+  const sessionIds = new Set<string>();
+  normalizedTasks.forEach(task => {
+    if (task.sessionId) {
+      sessionIds.add(task.sessionId as string);
+    }
+  });
+
+  sessionIds.forEach(sid => {
+    const existingTasks = service.getAllTasks();
+    const tasksInSession = existingTasks.filter(t => t.sessionId === sid);
+    const existingNames = new Set(tasksInSession.map(t => t.name.toLowerCase()));
+
+    const duplicateNames: string[] = [];
+    normalizedTasks.forEach(task => {
+      if (task.sessionId === sid && existingNames.has(task.name.toLowerCase())) {
+        duplicateNames.push(task.name);
+      }
+    });
+
+    if (duplicateNames.length > 0) {
+      logger.warn(`Duplicate task names detected in session ${sid}`, {
+        duplicates: duplicateNames,
+        sessionId: sid
+      });
+    }
+  });
+
+  // Default to skip deduplication for MCP-created tasks to avoid duplicate hanging tasks.
+  // Callers can override per-task with deduplication: 'none' or 'error'.
+  const tasks = service.createTasks(normalizedTasks, { defaultDeduplication: 'skip' });
 
   await service.forceSave();
 
@@ -74,7 +117,7 @@ export async function handleCreateTasks(
     ]
   };
 
-  await logger.logToolRequest('create_tasks', args, result);
+  await logger.logToolRequest('create_tasks', args, result, { sessionId });
   return result;
 }
 
@@ -92,14 +135,14 @@ export async function handleUpdateTask(
 
   const updates: Record<string, unknown> = {};
   if (validated.name !== undefined) updates.name = validated.name;
-  if (validated.description !== undefined) updates.description = validated.description;
+  if (validated.description !== undefined) updates.description = validated.description ?? undefined;
   if (validated.dependencies !== undefined) updates.dependencies = validated.dependencies;
   if (validated.softDependencies !== undefined) updates.softDependencies = validated.softDependencies;
   if (validated.dependencyTimeouts !== undefined) updates.dependencyTimeouts = validated.dependencyTimeouts;
   if (validated.externalDependencies !== undefined) updates.externalDependencies = validated.externalDependencies;
   if (validated.conditionalDependencies !== undefined) updates.conditionalDependencies = validated.conditionalDependencies;
-  if (validated.parentTaskId !== undefined) updates.parentTaskId = validated.parentTaskId;
-  if (validated.sessionId !== undefined) updates.sessionId = validated.sessionId;
+  if (validated.parentTaskId !== undefined) updates.parentTaskId = validated.parentTaskId ?? undefined;
+  if (validated.sessionId !== undefined) updates.sessionId = validated.sessionId ?? undefined;
   if (validated.metadata !== undefined) updates.metadata = validated.metadata;
 
   const task = service.updateTask(validated.id, updates);
@@ -808,6 +851,43 @@ export async function handleCleanupWorkflowRuns(
 }
 
 /**
+ * Cleanup tasks handler
+ */
+export async function handleCleanupTasks(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = CleanupTasksSchema.parse(args);
+
+  const cleanupResult = service.cleanupTasks({
+    deleteOrphans: validated.deleteOrphans,
+    deleteParentCompleted: validated.deleteParentCompleted,
+    deleteDuplicates: validated.deleteDuplicates,
+    deleteStalePending: validated.deleteStalePending,
+    stalePendingMs: validated.stalePendingMs
+  });
+
+  let detailsText = '';
+  if (cleanupResult.details.length > 0) {
+    detailsText = `\n\n**Deleted Tasks (${cleanupResult.details.length}):**\n${cleanupResult.details.map(d => `  - ${d.name} (ID: ${d.id}) - ${d.reason}`).join('\n')}`;
+  }
+
+  const result = {
+    content: [
+      {
+        type: 'text',
+        text: `🧹 Task cleanup complete\n\n**Deleted:** ${cleanupResult.deleted}\n**Orphaned subtasks found:** ${cleanupResult.orphanedSubtasks}\n**Parent-completed subtasks found:** ${cleanupResult.parentCompleted}\n**Duplicate tasks found:** ${cleanupResult.duplicateTasks}\n**Stale pending tasks found:** ${cleanupResult.stalePendingTasks}${detailsText}`
+      }
+    ]
+  };
+
+  await logger.logToolRequest('cleanup_tasks', args, result);
+  return result;
+}
+
+/**
  * Get version handler
  */
 export async function handleGetVersion(
@@ -1046,5 +1126,6 @@ export const handlerRegistry: Record<string, (context: HandlerContext, args: Rec
   clear_all: handleClearAll,
   save_state: handleSaveState,
   get_version: handleGetVersion,
-  cleanup_workflow_runs: handleCleanupWorkflowRuns
+  cleanup_workflow_runs: handleCleanupWorkflowRuns,
+  cleanup_tasks: handleCleanupTasks
 };

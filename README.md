@@ -21,14 +21,16 @@ LLMs excel at generating ideas but often struggle with:
 
 ## 🚀 Key Features
 
-- **📋 Task Management** — Create, update, track tasks with rich metadata
-- **🔗 Smart Dependencies** — Positional + ID-based dependencies, soft dependencies, timeouts
+- **📋 Task Management** — Create, update, track tasks with rich metadata, priority, and order
+- **🔗 Rich Dependencies** — Unified dependency model with types (hard/soft/conditional/external), failure policies, and metadata
 - **🏗️ Hierarchical Support** — Parent tasks with subtasks (LLM-friendly hierarchy)
-- **� Workflow Orchestration** — Group tasks into named workflows with automatic progression
+- **🎯 Workflow Orchestration** — Group tasks into named workflows with automatic progression
 - **⏱️ Execution Tracking** — Start/complete times, durations, retries
-- **� Persistent Storage** — JSON or SQLite backend
+- **💾 Persistent Storage** — JSON or SQLite backend
 - **🧹 Cleanup Tools** — Handle orphaned, duplicate, or stale tasks (common with LLM usage)
-- **� Statistics & Logging** — Full visibility into agent activity
+- **📊 Introspection Tools** — Dependency graphs, Mermaid export, blocked tasks, critical path analysis
+- **🔧 Dynamic Management** — Add, remove, update dependencies, move tasks at runtime
+- **📈 Statistics & Logging** — Full visibility into agent activity
 
 ## 🎯 LLM Best Practices (Recommended Patterns)
 
@@ -182,7 +184,11 @@ Create one or more tasks with optional dependencies and parent tasks.
 - `tasks` (required): Array of task objects, each with:
   - `name` (required): The name of the task
   - `description` (optional): Description of the task
-  - `dependencies` (optional): Array of task IDs or positional references (task-1, task-2...) that this task depends on
+  - `dependencies` (optional): Array of dependencies (string shorthand or RichDependency objects)
+    - **String shorthand**: Task ID, positional reference (task-1, task-2...), or task name
+    - **RichDependency object**: Full dependency with type, onFailure, condition, url, timeoutMs, metadata
+  - `priority` (optional): Task priority (higher = more important, affects execution order)
+  - `order` (optional): Order among siblings (for parent-child relationships)
   - `parentTaskId` (optional): Parent task ID for creating subtasks. **CRITICAL: Must be an actual existing task ID, NOT a positional reference.** Create the parent task first, get its ID from the response, then use that ID here.
   - `sessionId` (optional): Session ID for grouping related tasks (top-level field, e.g., "feature-auth")
   - `metadata` (optional): Additional metadata for the task
@@ -193,6 +199,7 @@ Create one or more tasks with optional dependencies and parent tasks.
 - Positional references (task-1, task-2, etc.) ONLY work for dependencies within the same batch
 - For parentTaskId, you MUST use actual existing task IDs - create the parent task first, get its ID from the response, then create subtasks using that ID
 - Do not use positional references for parentTaskId
+- Dependencies support rich types: hard (default), soft, conditional, external
 
 ### `update_task`
 Update an existing task.
@@ -201,7 +208,9 @@ Update an existing task.
 - `id` (required): The ID of the task to update
 - `name` (optional): New name for the task
 - `description` (optional): New description
-- `dependencies` (optional): New dependencies
+- `dependencies` (optional): New dependencies (string shorthand or RichDependency objects)
+- `priority` (optional): Task priority (higher = more important)
+- `order` (optional): Order among siblings
 - `metadata` (optional): New metadata
 
 ### `delete_task`
@@ -259,6 +268,36 @@ Retry a failed task, incrementing retry count.
 **Note:** Task will only be retried if it hasn't exceeded its `maxRetries` limit.
 
 ### Dependency Management
+
+### `add_dependency`
+Add a dependency to a task. Supports both string shorthand and RichDependency objects.
+
+**Parameters:**
+- `taskId` (required): The ID of the task to add dependency to
+- `dependency` (required): Dependency to add (string shorthand or RichDependency object)
+
+### `remove_dependency`
+Remove a dependency from a task.
+
+**Parameters:**
+- `taskId` (required): The ID of the task to remove dependency from
+- `depTaskId` (required): The dependency task ID to remove
+
+### `update_dependency`
+Update an existing dependency on a task.
+
+**Parameters:**
+- `taskId` (required): The ID of the task to update dependency for
+- `depTaskId` (required): The dependency task ID to update
+- `updates` (optional): Partial updates to apply (type, onFailure, condition, url, timeoutMs, metadata)
+
+### `move_task`
+Move a task to a new parent or change its order among siblings.
+
+**Parameters:**
+- `taskId` (required): The ID of the task to move
+- `newParentTaskId` (optional): New parent task ID (null to remove parent)
+- `position` (optional): Order position among siblings
 
 ### `get_next_tasks`
 Get tasks that are ready to execute (all dependencies completed).
@@ -322,6 +361,35 @@ Get tasks that are ready to execute within a specific workflow (dependency-aware
 **Parameters:**
 - `workflowId` (required): The ID of the workflow to get ready tasks for
 
+### Introspection Tools
+
+### `get_dependency_graph`
+Get the dependency graph for a session or workflow. Returns nodes (tasks) and edges (dependencies).
+
+**Parameters:**
+- `sessionId` (optional): Session ID to filter by
+- `workflowId` (optional): Workflow ID to filter by
+
+### `export_mermaid`
+Export the dependency graph as a Mermaid flowchart diagram.
+
+**Parameters:**
+- `sessionId` (optional): Session ID to filter by
+- `workflowId` (optional): Workflow ID to filter by
+
+### `get_blocked_tasks`
+Get blocked tasks with their blocking dependencies.
+
+**Parameters:**
+- `sessionId` (optional): Session ID to filter by
+- `workflowId` (optional): Workflow ID to filter by
+
+### `get_critical_path`
+Get the critical path for a workflow (longest path of dependencies).
+
+**Parameters:**
+- `workflowId` (required): Workflow ID to analyze
+
 ### System
 
 ### `get_stats`
@@ -347,11 +415,25 @@ Get the version information of this task orchestrator MCP server.
 }
 ```
 
-2. **Create dependent tasks:**
+2. **Create dependent tasks using RichDependency:**
 ```json
 {
   "name": "Run tests",
   "dependencies": ["task_1234567890_abc"]
+}
+```
+
+Or with rich dependency object:
+```json
+{
+  "name": "Run tests",
+  "dependencies": [
+    {
+      "taskId": "task_1234567890_abc",
+      "type": "hard",
+      "onFailure": "block"
+    }
+  ]
 }
 ```
 

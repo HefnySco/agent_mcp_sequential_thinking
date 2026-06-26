@@ -7,21 +7,33 @@ import type { TaskStatus } from './types.js';
 const TaskStatusSchema = z.enum(['pending', 'in_progress', 'completed', 'failed']);
 
 /**
- * Zod schema for external dependency
+ * Zod schema for RichDependency metadata
  */
-const ExternalDependencySchema = z.object({
-  type: z.enum(['api', 'health']),
-  url: z.string().url('Invalid URL format'),
-  timeoutMs: z.number().int().min(0).optional()
-});
+const DependencyMetadataSchema = z.object({
+  reason: z.string().optional(),
+  createdBy: z.enum(['user', 'agent', 'system']).optional(),
+  createdAt: z.string().optional(),
+  priorityBoost: z.number().int().min(0).optional()
+}).optional();
 
 /**
- * Zod schema for conditional dependency
+ * Zod schema for RichDependency
+ * Supports both shorthand (string) and full object forms
  */
-const ConditionalDependencySchema = z.object({
-  condition: z.string().min(1, 'Condition is required'),
-  taskId: z.string().min(1, 'Task ID is required')
-});
+const RichDependencySchema: z.ZodType = z.union([
+  // Shorthand: string (task ID or positional ref)
+  z.string().min(1),
+  // Full RichDependency object
+  z.object({
+    taskId: z.string().min(1, 'Task ID is required'),
+    type: z.enum(['hard', 'soft', 'conditional', 'external']).default('hard'),
+    onFailure: z.enum(['block', 'skip', 'proceed']).optional(),
+    condition: z.string().optional(),
+    url: z.string().url('Invalid URL format').optional(),
+    timeoutMs: z.number().int().min(0).optional(),
+    metadata: DependencyMetadataSchema
+  })
+]);
 
 /**
  * Zod schema for deduplication strategy
@@ -34,11 +46,9 @@ export const DeduplicationStrategySchema = z.enum(['skip', 'reuse', 'error', 'no
 export const CreateTaskSchema = z.object({
   name: z.string().min(1, 'Task name is required').max(255, 'Task name must be less than 255 characters'),
   description: z.string().max(1000, 'Description must be less than 1000 characters').optional().nullable(),
-  dependencies: z.array(z.string().min(1)).default([]),
-  softDependencies: z.array(z.string().min(1)).optional(),
-  dependencyTimeouts: z.record(z.string().min(1), z.number().int().min(0)).optional(),
-  externalDependencies: z.array(ExternalDependencySchema).optional(),
-  conditionalDependencies: z.array(ConditionalDependencySchema).optional(),
+  dependencies: z.array(RichDependencySchema).default([]),
+  priority: z.number().int().min(0).optional(),
+  order: z.number().int().min(0).optional(),
   parentTaskId: z.string().optional().nullable(),
   sessionId: z.string().optional().nullable(),
   metadata: z.record(z.string(), z.unknown()).optional(),
@@ -61,11 +71,9 @@ export const UpdateTaskSchema = z.object({
   id: z.string().min(1, 'Task ID is required'),
   name: z.string().min(1).max(255).optional(),
   description: z.string().max(1000).optional().nullable(),
-  dependencies: z.array(z.string().min(1)).optional(),
-  softDependencies: z.array(z.string().min(1)).optional(),
-  dependencyTimeouts: z.record(z.string().min(1), z.number().int().min(0)).optional(),
-  externalDependencies: z.array(ExternalDependencySchema).optional(),
-  conditionalDependencies: z.array(ConditionalDependencySchema).optional(),
+  dependencies: z.array(RichDependencySchema).optional(),
+  priority: z.number().int().min(0).optional(),
+  order: z.number().int().min(0).optional(),
   parentTaskId: z.string().optional().nullable(),
   sessionId: z.string().optional().nullable(),
   metadata: z.record(z.string(), z.unknown()).optional(),
@@ -212,3 +220,75 @@ export type ExecuteTaskInput = z.infer<typeof ExecuteTaskSchema>;
  * Type inference for fail task input
  */
 export type FailTaskInput = z.infer<typeof FailTaskSchema>;
+
+/**
+ * Zod schema for adding a dependency
+ */
+export const AddDependencySchema = z.object({
+  taskId: z.string().min(1, 'Task ID is required'),
+  dependency: RichDependencySchema
+});
+
+/**
+ * Zod schema for removing a dependency
+ */
+export const RemoveDependencySchema = z.object({
+  taskId: z.string().min(1, 'Task ID is required'),
+  depTaskId: z.string().min(1, 'Dependency task ID is required')
+});
+
+/**
+ * Zod schema for updating a dependency
+ */
+export const UpdateDependencySchema = z.object({
+  taskId: z.string().min(1, 'Task ID is required'),
+  depTaskId: z.string().min(1, 'Dependency task ID is required'),
+  updates: z.object({
+    type: z.enum(['hard', 'soft', 'conditional', 'external']).optional(),
+    onFailure: z.enum(['block', 'skip', 'proceed']).optional(),
+    condition: z.string().optional(),
+    url: z.string().url('Invalid URL format').optional(),
+    timeoutMs: z.number().int().min(0).optional(),
+    metadata: DependencyMetadataSchema
+  }).optional()
+});
+
+/**
+ * Zod schema for moving a task
+ */
+export const MoveTaskSchema = z.object({
+  taskId: z.string().min(1, 'Task ID is required'),
+  newParentTaskId: z.string().nullable().optional(),
+  position: z.number().int().min(0).optional()
+});
+
+/**
+ * Zod schema for getting dependency graph
+ */
+export const GetDependencyGraphSchema = z.object({
+  sessionId: z.string().optional(),
+  workflowId: z.string().optional()
+});
+
+/**
+ * Zod schema for exporting Mermaid diagram
+ */
+export const ExportMermaidSchema = z.object({
+  sessionId: z.string().optional(),
+  workflowId: z.string().optional()
+});
+
+/**
+ * Zod schema for getting blocked tasks
+ */
+export const GetBlockedTasksSchema = z.object({
+  sessionId: z.string().optional(),
+  workflowId: z.string().optional()
+});
+
+/**
+ * Zod schema for getting critical path
+ */
+export const GetCriticalPathSchema = z.object({
+  workflowId: z.string().min(1, 'Workflow ID is required')
+});

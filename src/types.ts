@@ -4,33 +4,21 @@
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 
 /**
- * Dependency with optional timeout
+ * Rich dependency model - unified replacement for all fragmented dependency fields
  */
-export interface DependencyWithTimeout {
+export interface RichDependency {
   taskId: string;
+  type: 'hard' | 'soft' | 'conditional' | 'external';
+  onFailure?: 'block' | 'skip' | 'proceed';  // default: 'block'
+  condition?: string;                          // for type: 'conditional'
+  url?: string;                                // for type: 'external'
   timeoutMs?: number;
-}
-
-/**
- * External dependency type
- */
-export type ExternalDependencyType = 'api' | 'health';
-
-/**
- * External dependency for service/API health checks
- */
-export interface ExternalDependency {
-  type: ExternalDependencyType;
-  url: string;
-  timeoutMs?: number;
-}
-
-/**
- * Conditional dependency with if/else logic
- */
-export interface ConditionalDependency {
-  condition: string;
-  taskId: string;
+  metadata?: {
+    reason?: string;
+    createdBy?: 'user' | 'agent' | 'system';
+    createdAt?: string;       // ISO timestamp
+    priorityBoost?: number;   // influence on composite readinessScore
+  };
 }
 
 /**
@@ -41,11 +29,9 @@ export interface Task {
   name: string;
   description?: string;
   status: TaskStatus;
-  dependencies: string[];
-  softDependencies?: string[]; // Optional dependencies that don't block execution
-  dependencyTimeouts?: Record<string, number>; // Task ID -> timeout in ms
-  externalDependencies?: ExternalDependency[];
-  conditionalDependencies?: ConditionalDependency[];
+  dependencies: RichDependency[];
+  priority?: number;   // higher = more important; used in composite scheduling score
+  order?: number;      // explicit position among siblings under same parent
   parentTaskId?: string;
   sessionId?: string; // Optional session ID for grouping unattached tasks
   createdAt: string;
@@ -71,11 +57,9 @@ export type DeduplicationStrategy = 'skip' | 'reuse' | 'error' | 'none';
 export interface CreateTaskInput {
   name: string;
   description?: string;
-  dependencies?: string[];
-  softDependencies?: string[];
-  dependencyTimeouts?: Record<string, number>;
-  externalDependencies?: ExternalDependency[];
-  conditionalDependencies?: ConditionalDependency[];
+  dependencies?: RichDependency[];
+  priority?: number;
+  order?: number;
   parentTaskId?: string;
   sessionId?: string; // Optional session ID for grouping unattached tasks
   metadata?: Record<string, unknown>;
@@ -98,11 +82,9 @@ export interface UpdateTaskInput {
   name?: string;
   description?: string;
   status?: TaskStatus;
-  dependencies?: string[];
-  softDependencies?: string[];
-  dependencyTimeouts?: Record<string, number>;
-  externalDependencies?: ExternalDependency[];
-  conditionalDependencies?: ConditionalDependency[];
+  dependencies?: RichDependency[];
+  priority?: number;
+  order?: number;
   parentTaskId?: string;
   sessionId?: string; // Optional session ID for grouping unattached tasks
   metadata?: Record<string, unknown>;
@@ -168,11 +150,26 @@ export interface CreateWorkflowInput {
 }
 
 /**
+ * Readiness score breakdown for intelligent scheduling
+ */
+export interface ReadinessScore {
+  score: number;  // 0-100 composite score
+  breakdown: {
+    hardDepsSatisfied: number;  // 0-60 points
+    softDepsSatisfied: number;  // 0-20 points
+    taskPriority: number;       // 0-10 points
+    priorityBoost: number;      // -10 to +10 points
+  };
+}
+
+/**
  * Task execution result
  */
 export interface TaskExecutionResult {
   canExecute: boolean;
   reason?: string;
+  readinessScore?: number;  // 0-100 composite score for scheduling
+  readinessBreakdown?: ReadinessScore['breakdown'];  // Detailed breakdown
 }
 
 /**

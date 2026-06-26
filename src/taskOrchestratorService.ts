@@ -8,7 +8,9 @@ import type {
   TaskStats,
   WorkflowRun,
   Workflow,
-  WorkflowRunStatus
+  WorkflowRunStatus,
+  RichDependency,
+  ReadinessScore
 } from './types.js';
 import {
   StorageError,
@@ -124,6 +126,23 @@ export class TaskOrchestratorService {
   }
 
   /**
+   * Normalize dependency input to RichDependency array
+   * Accepts: string (taskId), RichDependency object, or array of either
+   * Returns: RichDependency[] with all normalized objects
+   */
+  private normalizeDependencies(deps: (string | RichDependency)[] | undefined): RichDependency[] {
+    if (!deps || deps.length === 0) {
+      return [];
+    }
+    return deps.map(dep => {
+      if (typeof dep === 'string') {
+        return { taskId: dep, type: 'hard' };
+      }
+      return dep;
+    });
+  }
+
+  /**
    * Create a new task
    * @param task - Task creation input
    * @returns The created task
@@ -137,45 +156,46 @@ export class TaskOrchestratorService {
     const id = this.generateId();
     const now = new Date().toISOString();
     
+    // Normalize dependencies to RichDependency array
+    const normalizedDeps = this.normalizeDependencies(task.dependencies);
+    
     // Resolve and validate dependencies
-    // Supports: existing task IDs, or task names (case-insensitive match against existing tasks)
-    let resolvedDeps: string[] = [];
-    if (task.dependencies && task.dependencies.length > 0) {
-      for (const dep of task.dependencies) {
-        if (this.state.tasks.has(dep)) {
-          resolvedDeps.push(dep);
+    // Supports: existing task IDs, positional refs (task-N), or task names (case-insensitive)
+    const resolvedDeps: RichDependency[] = [];
+    for (const dep of normalizedDeps) {
+      const taskId = dep.taskId;
+      if (this.state.tasks.has(taskId)) {
+        resolvedDeps.push(dep);
+      } else {
+        // Try matching by task name (case-insensitive)
+        let nameMatch: Task | undefined;
+        for (const existingTask of this.state.tasks.values()) {
+          if (existingTask.name.toLowerCase() === taskId.toLowerCase()) {
+            nameMatch = existingTask;
+            break;
+          }
+        }
+        if (nameMatch) {
+          resolvedDeps.push({ ...dep, taskId: nameMatch.id });
         } else {
-          // Try matching by task name (case-insensitive)
-          let nameMatch: Task | undefined;
-          for (const existingTask of this.state.tasks.values()) {
-            if (existingTask.name.toLowerCase() === dep.toLowerCase()) {
-              nameMatch = existingTask;
-              break;
-            }
-          }
-          if (nameMatch) {
-            resolvedDeps.push(nameMatch.id);
-          } else {
-            throw new DependencyNotFoundError(
-              `Dependency '${dep}' could not be resolved. Use an existing task ID or task name.`
-            );
-          }
+          throw new DependencyNotFoundError(
+            `Dependency '${taskId}' could not be resolved. Use an existing task ID or task name.`
+          );
         }
       }
     }
     
-    // Validate parent task exists
-    if (task.parentTaskId && !this.state.tasks.has(task.parentTaskId)) {
-      throw new TaskNotFoundError(task.parentTaskId);
+    // Validate parent task exists and check for parent cycle
+    if (task.parentTaskId) {
+      if (!this.state.tasks.has(task.parentTaskId)) {
+        throw new TaskNotFoundError(task.parentTaskId);
+      }
+      this.checkParentCycle(id, task.parentTaskId);
     }
     
-    // Dependencies are NOT auto-added from parentTaskId
-    // Subtasks can start independently; parent waits for subtasks to complete
-    let dependencies = resolvedDeps;
-    
-    // Check for circular dependencies
-    if (dependencies && dependencies.length > 0) {
-      this.checkCircularDependency(id, dependencies);
+    // Check for circular dependencies in the DAG
+    if (resolvedDeps.length > 0) {
+      this.checkDependencyCycle(id, resolvedDeps);
     }
 
     // Inherit sessionId from parent if not explicitly provided
@@ -191,11 +211,9 @@ export class TaskOrchestratorService {
       id,
       name: task.name,
       description: task.description,
-      dependencies,
-      softDependencies: task.softDependencies,
-      dependencyTimeouts: task.dependencyTimeouts,
-      externalDependencies: task.externalDependencies,
-      conditionalDependencies: task.conditionalDependencies,
+      dependencies: resolvedDeps,
+      priority: task.priority,
+      order: task.order,
       parentTaskId: task.parentTaskId,
       sessionId,
       metadata: task.metadata,
@@ -326,10 +344,8 @@ export class TaskOrchestratorService {
         name: taskInput.name,
         description: taskInput.description,
         dependencies: [], // Will be resolved in second pass
-        softDependencies: taskInput.softDependencies,
-        dependencyTimeouts: taskInput.dependencyTimeouts,
-        externalDependencies: taskInput.externalDependencies,
-        conditionalDependencies: taskInput.conditionalDependencies,
+        priority: taskInput.priority,
+        order: taskInput.order,
         parentTaskId: taskInput.parentTaskId,
         sessionId,
         metadata: taskInput.metadata,
@@ -353,6 +369,7 @@ export class TaskOrchestratorService {
     // 2. Existing task ID (UUID already in state)
     // 3. Task name within this batch (case-insensitive match)
     // 4. Task name of an existing task in the system (case-insensitive match)
+    // 5. Full RichDependency object (with taskId as string or positional ref)
     for (let i = 0; i < tasks.length; i++) {
       const taskInput = tasks[i];
       const task = resultTasks[i];
@@ -361,60 +378,71 @@ export class TaskOrchestratorService {
         continue;
       }
 
-      const resolvedDependencies: string[] = [];
+      // Normalize dependencies to RichDependency array
+      const normalizedDeps = this.normalizeDependencies(taskInput.dependencies);
+      const resolvedDependencies: RichDependency[] = [];
 
-      for (const dep of taskInput.dependencies) {
+      for (const dep of normalizedDeps) {
+        const taskId = dep.taskId;
+        let resolvedTaskId: string;
+
         // Check if dependency is a positional reference (task-N format)
-        const positionalMatch = dep.match(/^task-(\d+)$/);
+        const positionalMatch = taskId.match(/^task-(\d+)$/);
         if (positionalMatch) {
           const index = parseInt(positionalMatch[1], 10) - 1; // Convert to 0-based index
           if (index >= 0 && index < tasks.length) {
             const mappedId = idMapping.get(String(index));
             if (mappedId) {
-              resolvedDependencies.push(mappedId);
+              resolvedTaskId = mappedId;
             } else {
               throw new DependencyNotFoundError(
-                `Positional dependency '${dep}' references a task that was deduplicated and not created in this batch`
+                `Positional dependency '${taskId}' references a task that was deduplicated and not created in this batch`
               );
             }
           } else {
             // Out of range positional index
             throw new DependencyNotFoundError(
-              `Positional dependency '${dep}' is out of range (valid range: task-1 to task-${tasks.length})`
+              `Positional dependency '${taskId}' is out of range (valid range: task-1 to task-${tasks.length})`
             );
           }
-        } else if (this.state.tasks.has(dep)) {
+        } else if (this.state.tasks.has(taskId)) {
           // Existing task ID reference
-          resolvedDependencies.push(dep);
+          resolvedTaskId = taskId;
         } else {
           // Try matching by task name within this batch (case-insensitive)
           const batchMatchIndex = tasks.findIndex(
-            t => t.name.toLowerCase() === dep.toLowerCase()
+            t => t.name.toLowerCase() === taskId.toLowerCase()
           );
           if (batchMatchIndex !== -1) {
             const mappedId = idMapping.get(String(batchMatchIndex));
             if (mappedId) {
-              resolvedDependencies.push(mappedId);
-              continue;
+              resolvedTaskId = mappedId;
+            } else {
+              throw new DependencyNotFoundError(
+                `Dependency '${taskId}' could not be resolved in batch`
+              );
             }
-          }
-
-          // Try matching by task name among existing tasks in the system (case-insensitive)
-          let existingNameMatch: Task | undefined;
-          for (const existingTask of this.state.tasks.values()) {
-            if (existingTask.name.toLowerCase() === dep.toLowerCase()) {
-              existingNameMatch = existingTask;
-              break;
-            }
-          }
-          if (existingNameMatch) {
-            resolvedDependencies.push(existingNameMatch.id);
           } else {
-            throw new DependencyNotFoundError(
-              `Dependency '${dep}' could not be resolved. Use 'task-N' for a positional reference, an existing task ID, or a task name (in this batch or existing).`
-            );
+            // Try matching by task name among existing tasks in the system (case-insensitive)
+            let existingNameMatch: Task | undefined;
+            for (const existingTask of this.state.tasks.values()) {
+              if (existingTask.name.toLowerCase() === taskId.toLowerCase()) {
+                existingNameMatch = existingTask;
+                break;
+              }
+            }
+            if (existingNameMatch) {
+              resolvedTaskId = existingNameMatch.id;
+            } else {
+              throw new DependencyNotFoundError(
+                `Dependency '${taskId}' could not be resolved. Use 'task-N' for a positional reference, an existing task ID, or a task name (in this batch or existing).`
+              );
+            }
           }
         }
+
+        // Add resolved dependency with original metadata
+        resolvedDependencies.push({ ...dep, taskId: resolvedTaskId });
       }
 
       // Update task with resolved dependencies
@@ -422,17 +450,17 @@ export class TaskOrchestratorService {
       this.state.tasks.set(task.id, task);
     }
 
-    // Third pass: Check for circular dependencies
+    // Third pass: Check for circular dependencies in DAG
     for (let i = 0; i < resultTasks.length; i++) {
       const task = resultTasks[i];
       if (task.dependencies && task.dependencies.length > 0) {
-        this.checkCircularDependency(task.id, task.dependencies);
+        this.checkDependencyCycle(task.id, task.dependencies);
       }
 
       // Validate all dependency IDs exist in state (defensive)
-      for (const depId of task.dependencies) {
-        if (!this.state.tasks.has(depId)) {
-          throw new DependencyNotFoundError(depId);
+      for (const dep of task.dependencies) {
+        if (!this.state.tasks.has(dep.taskId)) {
+          throw new DependencyNotFoundError(dep.taskId);
         }
       }
     }
@@ -442,72 +470,103 @@ export class TaskOrchestratorService {
   }
 
   /**
-   * Check for circular dependencies in task graph
+   * Check for circular dependencies in the dependency DAG
    * @param taskId - The new task ID being created
    * @param dependencies - Dependencies of the new task
-   * @throws Error if circular dependency is detected
+   * @throws Error if circular dependency is detected with full path
    */
-  private checkCircularDependency(taskId: string, dependencies: string[]): void {
+  private checkDependencyCycle(taskId: string, dependencies: RichDependency[]): void {
     const visited = new Set<string>();
     const recursionStack = new Set<string>();
+    const path: string[] = [];
 
     const hasCycle = (currentId: string): boolean => {
       visited.add(currentId);
       recursionStack.add(currentId);
+      path.push(currentId);
 
       const task = this.state.tasks.get(currentId);
       if (task) {
-        for (const depId of task.dependencies) {
+        for (const dep of task.dependencies) {
+          const depId = dep.taskId;
           if (!visited.has(depId)) {
             if (hasCycle(depId)) {
               return true;
             }
           } else if (recursionStack.has(depId)) {
+            path.push(depId);
             return true;
           }
         }
       }
 
       recursionStack.delete(currentId);
+      path.pop();
       return false;
     };
 
-    // Check if following dependencies from taskId leads back to itself
-    // This works for both single task creation and batch creation
-    const task = this.state.tasks.get(taskId);
-    if (!task) {
-      // Task not in state yet (single task creation scenario)
-      // Use the old logic with temporary task
-      const now = new Date().toISOString();
-      for (const depId of dependencies) {
-        visited.clear();
-        recursionStack.clear();
+    // Task not in state yet (single task creation scenario)
+    // Use temporary task to check for cycles
+    const now = new Date().toISOString();
+    for (const dep of dependencies) {
+      visited.clear();
+      recursionStack.clear();
+      path.length = 0;
 
-        // Temporarily add the new task to check for cycles
-        this.state.tasks.set(taskId, {
-          id: taskId,
-          name: 'temp',
-          status: TASK_STATUS.PENDING,
-          dependencies: [],
-          createdAt: now,
-          updatedAt: now
-        } as Task);
+      // Temporarily add the new task to check for cycles
+      this.state.tasks.set(taskId, {
+        id: taskId,
+        name: 'temp',
+        status: TASK_STATUS.PENDING,
+        dependencies: dependencies,
+        createdAt: now,
+        updatedAt: now
+      } as Task);
 
-        const hasCycleFromDep = hasCycle(depId);
+      const hasCycleFromDep = hasCycle(dep.taskId);
 
-        // Remove the temporary task
-        this.state.tasks.delete(taskId);
+      // Remove the temporary task
+      this.state.tasks.delete(taskId);
 
-        if (hasCycleFromDep) {
-          throw new Error(`Circular dependency detected: task ${taskId} depends on ${depId}, which would create a cycle`);
+      if (hasCycleFromDep) {
+        throw new Error(`Circular dependency detected: ${path.join(' → ')}`);
+      }
+    }
+  }
+
+  /**
+   * Check for circular parent relationships in the hierarchy tree
+   * @param taskId - The new task ID being created
+   * @param parentTaskId - The parent task ID
+   * @throws Error if circular parent relationship is detected
+   */
+  private checkParentCycle(taskId: string, parentTaskId: string): void {
+    const visited = new Set<string>();
+    const path: string[] = [];
+
+    const hasCycle = (currentId: string): boolean => {
+      if (currentId === taskId) {
+        return true;
+      }
+      if (visited.has(currentId)) {
+        return false;
+      }
+      visited.add(currentId);
+      path.push(currentId);
+
+      const task = this.state.tasks.get(currentId);
+      if (task && task.parentTaskId) {
+        if (hasCycle(task.parentTaskId)) {
+          return true;
         }
       }
-    } else {
-      // Task is already in state (batch creation scenario)
-      // Just check if following dependencies leads back to taskId
-      if (hasCycle(taskId)) {
-        throw new Error(`Circular dependency detected involving task ${taskId}`);
-      }
+
+      path.pop();
+      return false;
+    };
+
+    if (hasCycle(parentTaskId)) {
+      throw new Error(`Circular parent relationship detected: ${taskId} → ${path.join(' → ')} → ${taskId}`);
     }
   }
 
@@ -626,9 +685,141 @@ export class TaskOrchestratorService {
   }
 
   /**
+   * Calculate composite readiness score for a task (0-100)
+   * Scoring breakdown:
+   * - 60 points: All hard/conditional/external dependencies satisfied (blocking)
+   * - 20 points: Proportion of soft dependencies satisfied
+   * - 10 points: Task's own priority (normalized 0-100 range)
+   * - 10 points: Total priorityBoost from all dependencies (clamped -10 to +10)
+   * @param task - Task to score
+   * @returns Readiness score with detailed breakdown
+   */
+  private calculateReadinessScore(task: Task): ReadinessScore {
+    const hardDeps: RichDependency[] = [];
+    const softDeps: RichDependency[] = [];
+    const conditionalDeps: RichDependency[] = [];
+    const externalDeps: RichDependency[] = [];
+
+    // Categorize dependencies
+    for (const dep of task.dependencies) {
+      switch (dep.type) {
+        case 'hard':
+          hardDeps.push(dep);
+          break;
+        case 'soft':
+          softDeps.push(dep);
+          break;
+        case 'conditional':
+          conditionalDeps.push(dep);
+          break;
+        case 'external':
+          externalDeps.push(dep);
+          break;
+      }
+    }
+
+    // Check hard dependencies (blocking) - 60 points if all satisfied
+    let hardDepsMet = true;
+    for (const dep of hardDeps) {
+      const depTask = this.state.tasks.get(dep.taskId);
+      if (!depTask) {
+        hardDepsMet = false;
+        break;
+      }
+      
+      const isSatisfied = depTask.status === TASK_STATUS.COMPLETED || 
+                         (depTask.status === TASK_STATUS.FAILED && (dep.onFailure === 'skip' || dep.onFailure === 'proceed'));
+      
+      if (!isSatisfied) {
+        // Check timeout - if exceeded, treat as satisfied
+        if (dep.timeoutMs) {
+          const depCreatedAt = new Date(depTask.createdAt).getTime();
+          const elapsed = Date.now() - depCreatedAt;
+          if (elapsed > dep.timeoutMs) {
+            continue; // Timeout exceeded, treat as satisfied
+          }
+        }
+        hardDepsMet = false;
+        break;
+      }
+    }
+
+    // Check conditional dependencies (blocking if condition is true) - part of 60 points
+    for (const dep of conditionalDeps) {
+      if (dep.condition && this.evaluateCondition(dep.condition)) {
+        const depTask = this.state.tasks.get(dep.taskId);
+        if (!depTask) {
+          hardDepsMet = false;
+          break;
+        }
+        if (depTask.status !== TASK_STATUS.COMPLETED) {
+          const onFailure = dep.onFailure || 'block';
+          if (onFailure === 'block' || (depTask.status !== TASK_STATUS.FAILED)) {
+            hardDepsMet = false;
+            break;
+          }
+        }
+      }
+    }
+
+    // Check external dependencies (blocking) - part of 60 points
+    // Note: External deps are checked asynchronously in canExecuteTaskWithExternalChecks
+    // For synchronous scoring, we assume they're satisfied (will be validated in async check)
+    // If external deps exist and are not yet validated, we give partial points
+    let externalDepsSatisfied = externalDeps.length === 0;
+    if (externalDeps.length > 0) {
+      // For now, assume external deps are satisfied for scoring purposes
+      // The actual validation happens in canExecuteTaskWithExternalChecks
+      externalDepsSatisfied = true;
+    }
+
+    const hardDepsSatisfied = (hardDepsMet && externalDepsSatisfied) ? 60 : 0;
+
+    // Soft deps contribution (up to 20 points)
+    // Soft deps NEVER block execution, but influence scoring
+    let softDepsMet = 0;
+    for (const dep of softDeps) {
+      const depTask = this.state.tasks.get(dep.taskId);
+      if (depTask && depTask.status === TASK_STATUS.COMPLETED) {
+        softDepsMet++;
+      }
+    }
+    const softDepsSatisfied = softDeps.length > 0 
+      ? (softDepsMet / softDeps.length) * 20 
+      : 20; // No soft deps, full points
+
+    // Task priority contribution (up to 10 points)
+    // Normalize priority 0-100 to 0-10 points
+    const taskPriority = task.priority !== undefined 
+      ? Math.min(task.priority / 10, 10) 
+      : 5; // Default priority (raw=50, normalized=5 for mid-range)
+
+    // PriorityBoost from dep metadata (clamped -10 to +10)
+    let priorityBoost = 0;
+    for (const dep of task.dependencies) {
+      if (dep.metadata?.priorityBoost) {
+        priorityBoost += dep.metadata.priorityBoost;
+      }
+    }
+    const priorityBoostClamped = Math.max(-10, Math.min(priorityBoost, 10));
+
+    const totalScore = Math.round(hardDepsSatisfied + softDepsSatisfied + taskPriority + priorityBoostClamped);
+
+    return {
+      score: totalScore,
+      breakdown: {
+        hardDepsSatisfied,
+        softDepsSatisfied,
+        taskPriority,
+        priorityBoost: priorityBoostClamped
+      }
+    };
+  }
+
+  /**
    * Check if a task can be executed based on its dependencies
    * @param taskId - Task ID to check
-   * @returns Execution check result with reason if not executable
+   * @returns Execution check result with reason if not executable and composite readinessScore
    */
   canExecuteTask(taskId: string): TaskExecutionResult {
     const task = this.state.tasks.get(taskId);
@@ -640,75 +831,71 @@ export class TaskOrchestratorService {
       return { canExecute: false, reason: `Task is ${task.status}` };
     }
 
-    // Check if all hard dependencies are completed
-    for (const depId of task.dependencies) {
-      const depTask = this.state.tasks.get(depId);
-      if (!depTask) {
-        return { canExecute: false, reason: `Dependency ${depId} not found` };
+    const hardDeps: RichDependency[] = [];
+    const conditionalDeps: RichDependency[] = [];
+
+    // Categorize blocking dependencies
+    for (const dep of task.dependencies) {
+      switch (dep.type) {
+        case 'hard':
+          hardDeps.push(dep);
+          break;
+        case 'conditional':
+          conditionalDeps.push(dep);
+          break;
+        // Soft deps never block, external deps checked separately
       }
-      if (depTask.status !== TASK_STATUS.COMPLETED) {
-        // Check if dependency has a timeout and has exceeded it
-        if (task.dependencyTimeouts && task.dependencyTimeouts[depId]) {
-          const timeoutMs = task.dependencyTimeouts[depId];
+    }
+
+    // Check hard dependencies (blocking)
+    for (const dep of hardDeps) {
+      const depTask = this.state.tasks.get(dep.taskId);
+      if (!depTask) {
+        return { canExecute: false, reason: `Dependency ${dep.taskId} not found` };
+      }
+      
+      const isSatisfied = depTask.status === TASK_STATUS.COMPLETED || 
+                         (depTask.status === TASK_STATUS.FAILED && (dep.onFailure === 'skip' || dep.onFailure === 'proceed'));
+      
+      if (!isSatisfied) {
+        // Check timeout - if exceeded, allow execution
+        if (dep.timeoutMs) {
           const depCreatedAt = new Date(depTask.createdAt).getTime();
           const elapsed = Date.now() - depCreatedAt;
-          if (elapsed > timeoutMs) {
-            // Dependency timeout exceeded - allow execution despite incomplete dependency
-            continue;
+          if (elapsed > dep.timeoutMs) {
+            continue; // Timeout exceeded, allow execution
           }
         }
-        return { canExecute: false, reason: `Dependency ${depId} is ${depTask.status}` };
+        return { canExecute: false, reason: `Hard dependency ${dep.taskId} is ${depTask.status}` };
       }
     }
 
-    // Soft dependencies are checked but don't block execution
-    // They're logged as warnings but don't prevent execution
-    if (task.softDependencies && task.softDependencies.length > 0) {
-      const unmetSoftDeps: string[] = [];
-      for (const softDepId of task.softDependencies) {
-        const softDepTask = this.state.tasks.get(softDepId);
-        if (!softDepTask || softDepTask.status !== TASK_STATUS.COMPLETED) {
-          unmetSoftDeps.push(softDepId);
+    // Check conditional dependencies (blocking if condition is true)
+    for (const dep of conditionalDeps) {
+      if (dep.condition && this.evaluateCondition(dep.condition)) {
+        const depTask = this.state.tasks.get(dep.taskId);
+        if (!depTask) {
+          return { canExecute: false, reason: `Conditional dependency task ${dep.taskId} not found` };
         }
-      }
-      if (unmetSoftDeps.length > 0) {
-        // Soft dependencies not met, but allow execution
-        // The reason will be informational only
-        return {
-          canExecute: true,
-          reason: `Note: Soft dependencies not met: ${unmetSoftDeps.join(', ')}. Execution will proceed.`
-        };
-      }
-    }
-
-    // Check external dependencies (API/health checks)
-    // Note: External dependencies are skipped in synchronous check
-    // Use canExecuteTaskWithExternalChecks for full validation including external deps
-    if (task.externalDependencies && task.externalDependencies.length > 0) {
-      // For now, we skip external dependency checks in the synchronous version
-      // to maintain backward compatibility
-      // This could be enhanced with a flag to enable/disable external checks
-    }
-
-    // Check conditional dependencies (if/else logic)
-    if (task.conditionalDependencies && task.conditionalDependencies.length > 0) {
-      for (const condDep of task.conditionalDependencies) {
-        const shouldExecute = this.evaluateCondition(condDep.condition);
-        if (shouldExecute) {
-          // Condition is true, check if the conditional dependency task is completed
-          const condTask = this.state.tasks.get(condDep.taskId);
-          if (!condTask) {
-            return { canExecute: false, reason: `Conditional dependency task ${condDep.taskId} not found` };
-          }
-          if (condTask.status !== TASK_STATUS.COMPLETED) {
-            return { canExecute: false, reason: `Conditional dependency ${condDep.taskId} is ${condTask.status}` };
+        if (depTask.status !== TASK_STATUS.COMPLETED) {
+          const onFailure = dep.onFailure || 'block';
+          // Respect onFailure policy for conditional deps too
+          if (onFailure === 'block' || (depTask.status !== TASK_STATUS.FAILED)) {
+            return { canExecute: false, reason: `Conditional dependency ${dep.taskId} is ${depTask.status}` };
           }
         }
-        // If condition is false, the dependency is not required
       }
     }
 
-    return { canExecute: true };
+    // External dependencies are skipped in synchronous check
+    // (use canExecuteTaskWithExternalChecks for full validation)
+
+    const readinessScore = this.calculateReadinessScore(task);
+    return { 
+      canExecute: true, 
+      readinessScore: readinessScore.score,
+      readinessBreakdown: readinessScore.breakdown
+    };
   }
 
   /**
@@ -789,11 +976,52 @@ export class TaskOrchestratorService {
 
   /**
    * Get tasks that are ready to execute (all dependencies completed)
-   * @returns Array of executable tasks
+   * Sorted by composite readinessScore and dependent count as tie-breaker
+   * @returns Array of executable tasks, sorted by priority
    */
   getNextExecutableTasks(): Task[] {
     const pendingTasks = this.getTasksByStatus(TASK_STATUS.PENDING);
-    return pendingTasks.filter(task => this.canExecuteTask(task.id).canExecute);
+    
+    // Cache canExecuteTask results to avoid duplicate calls
+    const executionCache = new Map<string, TaskExecutionResult>();
+    const executableTasks = pendingTasks.filter(task => {
+      const result = this.canExecuteTask(task.id);
+      executionCache.set(task.id, result);
+      return result.canExecute;
+    });
+
+    // Count dependents for each task (tie-breaker)
+    const dependentCount = new Map<string, number>();
+    for (const task of this.state.tasks.values()) {
+      for (const dep of task.dependencies) {
+        dependentCount.set(dep.taskId, (dependentCount.get(dep.taskId) || 0) + 1);
+      }
+    }
+
+    // Sort by: 1) readiness score (desc), 2) dependent count (desc), 3) task priority (desc)
+    return executableTasks.sort((a, b) => {
+      const resultA = executionCache.get(a.id)!;
+      const resultB = executionCache.get(b.id)!;
+      
+      // Primary: readiness score (higher first)
+      const scoreA = resultA.readinessScore ?? 0;
+      const scoreB = resultB.readinessScore ?? 0;
+      if (scoreA !== scoreB) {
+        return scoreB - scoreA;
+      }
+      
+      // Secondary: dependent count (more dependents first)
+      const depCountA = dependentCount.get(a.id) || 0;
+      const depCountB = dependentCount.get(b.id) || 0;
+      if (depCountA !== depCountB) {
+        return depCountB - depCountA;
+      }
+      
+      // Tertiary: task priority (higher first)
+      const priorityA = a.priority ?? 50; // Default mid-range
+      const priorityB = b.priority ?? 50;
+      return priorityB - priorityA;
+    });
   }
 
   /**
@@ -891,20 +1119,32 @@ export class TaskOrchestratorService {
       return { canExecute: false, reason: 'Task not found' };
     }
 
-    // Check external dependencies (API/health checks)
-    if (task.externalDependencies && task.externalDependencies.length > 0) {
-      for (const extDep of task.externalDependencies) {
-        const isHealthy = await this.checkExternalDependency(extDep);
+    // Check external dependencies (API/health checks) from RichDependency
+    const externalDeps = task.dependencies.filter(dep => dep.type === 'external');
+    if (externalDeps.length > 0) {
+      for (const extDep of externalDeps) {
+        if (!extDep.url) {
+          continue;
+        }
+        const isHealthy = await this.checkExternalDependency({
+          type: extDep.type === 'external' ? 'api' : extDep.type,
+          url: extDep.url,
+          timeoutMs: extDep.timeoutMs
+        });
         if (!isHealthy) {
           return {
             canExecute: false,
-            reason: `External dependency ${extDep.type} at ${extDep.url} is not available`
+            reason: `External dependency at ${extDep.url} is not available`
           };
         }
       }
     }
 
-    return { canExecute: true };
+    return { 
+      canExecute: true, 
+      readinessScore: syncResult.readinessScore,
+      readinessBreakdown: syncResult.readinessBreakdown
+    };
   }
 
   /**
@@ -1291,7 +1531,7 @@ export class TaskOrchestratorService {
     completedTaskIds: string[],
     activeTaskIds: string[]
   ): { readyTasks: Task[]; blockedTaskIds: string[] } {
-    const readyTasks: Task[] = [];
+    const readyTasksWithScores: Array<{ task: Task; score: number }> = [];
     const blockedTaskIds: string[] = [];
 
     for (const taskId of workflow.taskIds) {
@@ -1308,12 +1548,20 @@ export class TaskOrchestratorService {
 
       const canExecute = this.canExecuteTask(taskId);
       if (canExecute.canExecute) {
-        readyTasks.push(task);
-        this.markTaskInProgress(taskId);
+        readyTasksWithScores.push({ task, score: canExecute.readinessScore ?? 0 });
       } else {
         blockedTaskIds.push(taskId);
       }
     }
+
+    // Sort ready tasks by readinessScore (descending) for smarter scheduling
+    readyTasksWithScores.sort((a, b) => b.score - a.score);
+
+    // Mark tasks as in progress after sorting
+    const readyTasks = readyTasksWithScores.map(({ task }) => {
+      this.markTaskInProgress(task.id);
+      return task;
+    });
 
     return { readyTasks, blockedTaskIds };
   }
@@ -1604,5 +1852,290 @@ export class TaskOrchestratorService {
     }
 
     return readyTasks;
+  }
+
+  /**
+   * Add a dependency to a task
+   * @param taskId - Task ID to add dependency to
+   * @param dependency - Dependency to add (string or RichDependency)
+   * @returns The updated task or null if not found
+   */
+  addDependency(taskId: string, dependency: string | RichDependency): Task | null {
+    const task = this.state.tasks.get(taskId);
+    if (!task) return null;
+
+    const normalizedDep = this.normalizeDependencies([dependency])[0];
+    
+    // Resolve the dependency
+    let resolvedTaskId: string;
+    if (this.state.tasks.has(normalizedDep.taskId)) {
+      resolvedTaskId = normalizedDep.taskId;
+    } else {
+      // Try matching by task name
+      let nameMatch: Task | undefined;
+      for (const existingTask of this.state.tasks.values()) {
+        if (existingTask.name.toLowerCase() === normalizedDep.taskId.toLowerCase()) {
+          nameMatch = existingTask;
+          break;
+        }
+      }
+      if (nameMatch) {
+        resolvedTaskId = nameMatch.id;
+      } else {
+        throw new DependencyNotFoundError(`Dependency '${normalizedDep.taskId}' could not be resolved`);
+      }
+    }
+
+    // Check for cycles
+    this.checkDependencyCycle(taskId, [{ ...normalizedDep, taskId: resolvedTaskId }]);
+
+    // Add the dependency
+    task.dependencies.push({ ...normalizedDep, taskId: resolvedTaskId });
+    task.updatedAt = new Date().toISOString();
+    this.state.tasks.set(taskId, task);
+    this.triggerSave();
+    return task;
+  }
+
+  /**
+   * Remove a dependency from a task
+   * @param taskId - Task ID to remove dependency from
+   * @param depTaskId - Dependency task ID to remove
+   * @returns The updated task or null if not found
+   */
+  removeDependency(taskId: string, depTaskId: string): Task | null {
+    const task = this.state.tasks.get(taskId);
+    if (!task) return null;
+
+    task.dependencies = task.dependencies.filter(dep => dep.taskId !== depTaskId);
+    task.updatedAt = new Date().toISOString();
+    this.state.tasks.set(taskId, task);
+    this.triggerSave();
+    return task;
+  }
+
+  /**
+   * Update an existing dependency
+   * @param taskId - Task ID to update dependency for
+   * @param depTaskId - Dependency task ID to update
+   * @param updates - Partial updates to apply to the dependency
+   * @returns The updated task or null if not found
+   */
+  updateDependency(taskId: string, depTaskId: string, updates: Partial<RichDependency>): Task | null {
+    const task = this.state.tasks.get(taskId);
+    if (!task) return null;
+
+    const depIndex = task.dependencies.findIndex(dep => dep.taskId === depTaskId);
+    if (depIndex === -1) return null;
+
+    task.dependencies[depIndex] = { ...task.dependencies[depIndex], ...updates };
+    task.updatedAt = new Date().toISOString();
+    this.state.tasks.set(taskId, task);
+    this.triggerSave();
+    return task;
+  }
+
+  /**
+   * Move a task to a new parent
+   * @param taskId - Task ID to move
+   * @param newParentTaskId - New parent task ID (null to remove parent)
+   * @param position - Optional position among siblings
+   * @returns The updated task or null if not found
+   */
+  moveTask(taskId: string, newParentTaskId: string | null, position?: number): Task | null {
+    const task = this.state.tasks.get(taskId);
+    if (!task) return null;
+
+    if (newParentTaskId && !this.state.tasks.has(newParentTaskId)) {
+      throw new TaskNotFoundError(newParentTaskId);
+    }
+
+    // Check for parent cycle
+    if (newParentTaskId) {
+      this.checkParentCycle(taskId, newParentTaskId);
+    }
+
+    task.parentTaskId = newParentTaskId || undefined;
+    if (position !== undefined) {
+      task.order = position;
+    }
+    task.updatedAt = new Date().toISOString();
+    this.state.tasks.set(taskId, task);
+    this.triggerSave();
+    return task;
+  }
+
+  /**
+   * Get the dependency graph for a session or workflow
+   * @param sessionId - Optional session ID to filter by
+   * @param workflowId - Optional workflow ID to filter by
+   * @returns Object with nodes (tasks) and edges (dependencies)
+   */
+  getDependencyGraph(sessionId?: string, workflowId?: string): { nodes: Task[]; edges: { from: string; to: string; type: string }[] } {
+    let tasks: Task[];
+    
+    if (workflowId) {
+      const workflow = this.state.workflows.get(workflowId);
+      if (!workflow) return { nodes: [], edges: [] };
+      tasks = workflow.taskIds.map(id => this.state.tasks.get(id)).filter((t): t is Task => t !== undefined);
+    } else if (sessionId) {
+      tasks = Array.from(this.state.tasks.values()).filter(t => t.sessionId === sessionId);
+    } else {
+      tasks = Array.from(this.state.tasks.values());
+    }
+
+    const edges: { from: string; to: string; type: string }[] = [];
+    for (const task of tasks) {
+      for (const dep of task.dependencies) {
+        edges.push({ from: dep.taskId, to: task.id, type: dep.type });
+      }
+    }
+
+    return { nodes: tasks, edges };
+  }
+
+  /**
+   * Export the dependency graph as a Mermaid diagram
+   * @param sessionId - Optional session ID to filter by
+   * @param workflowId - Optional workflow ID to filter by
+   * @returns Mermaid flowchart TD string
+   */
+  exportMermaid(sessionId?: string, workflowId?: string): string {
+    const { nodes, edges } = this.getDependencyGraph(sessionId, workflowId);
+    
+    let mermaid = 'flowchart TD\n';
+    
+    // Add nodes
+    for (const node of nodes) {
+      const label = node.name.replace(/"/g, '\\"');
+      const statusColor = node.status === 'completed' ? 'green' : node.status === 'failed' ? 'red' : 'gray';
+      mermaid += `  ${node.id}["${label}"]:::${statusColor}\n`;
+    }
+    
+    // Add edges
+    for (const edge of edges) {
+      const style = edge.type === 'soft' ? '-.->' : edge.type === 'conditional' ? '==>?' : '-->';
+      mermaid += `  ${edge.from} ${style} ${edge.to}\n`;
+    }
+    
+    return mermaid;
+  }
+
+  /**
+   * Get blocked tasks with their blocking dependencies
+   * @param sessionId - Optional session ID to filter by
+   * @param workflowId - Optional workflow ID to filter by
+   * @returns Array of tasks with their blocking dependency IDs
+   */
+  getBlockedTasks(sessionId?: string, workflowId?: string): { task: Task; blockingDeps: string[] }[] {
+    const { nodes } = this.getDependencyGraph(sessionId, workflowId);
+    const blocked: { task: Task; blockingDeps: string[] }[] = [];
+
+    for (const task of nodes) {
+      if (task.status !== TASK_STATUS.PENDING) continue;
+
+      const result = this.canExecuteTask(task.id);
+      if (!result.canExecute) {
+        const blockingDeps: string[] = [];
+        for (const dep of task.dependencies) {
+          const depTask = this.state.tasks.get(dep.taskId);
+          if (!depTask || depTask.status !== TASK_STATUS.COMPLETED) {
+            blockingDeps.push(dep.taskId);
+          }
+        }
+        if (blockingDeps.length > 0) {
+          blocked.push({ task, blockingDeps });
+        }
+      }
+    }
+
+    return blocked;
+  }
+
+  /**
+   * Get the critical path for a workflow
+   * @param workflowId - Workflow ID to analyze
+   * @returns Array of task IDs in the critical path
+   */
+  getCriticalPath(workflowId: string): string[] {
+    const workflow = this.state.workflows.get(workflowId);
+    if (!workflow) return [];
+
+    // Build dependency graph
+    const depCount = new Map<string, number>();
+    const dependents = new Map<string, string[]>();
+    
+    for (const taskId of workflow.taskIds) {
+      depCount.set(taskId, 0);
+      dependents.set(taskId, []);
+    }
+
+    for (const taskId of workflow.taskIds) {
+      const task = this.state.tasks.get(taskId);
+      if (!task) continue;
+      
+      for (const dep of task.dependencies) {
+        if (workflow.taskIds.includes(dep.taskId)) {
+          depCount.set(taskId, (depCount.get(taskId) || 0) + 1);
+          dependents.get(dep.taskId)?.push(taskId);
+        }
+      }
+    }
+
+    // Find tasks with no dependencies (start nodes)
+    const queue: string[] = [];
+    for (const taskId of workflow.taskIds) {
+      if (depCount.get(taskId) === 0) {
+        queue.push(taskId);
+      }
+    }
+
+    // Topological sort to find longest path
+    const longestPath: string[] = [];
+    const longestPathLength = new Map<string, number>();
+    const predecessor = new Map<string, string>();
+
+    for (const taskId of workflow.taskIds) {
+      longestPathLength.set(taskId, 0);
+    }
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      
+      for (const dependent of dependents.get(current) || []) {
+        const currentLength = longestPathLength.get(current) || 0;
+        const dependentLength = longestPathLength.get(dependent) || 0;
+        
+        if (currentLength + 1 > dependentLength) {
+          longestPathLength.set(dependent, currentLength + 1);
+          predecessor.set(dependent, current);
+        }
+        
+        depCount.set(dependent, (depCount.get(dependent) || 0) - 1);
+        if (depCount.get(dependent) === 0) {
+          queue.push(dependent);
+        }
+      }
+    }
+
+    // Find the end of the longest path
+    let maxTask = '';
+    let maxLength = 0;
+    for (const [taskId, length] of longestPathLength) {
+      if (length > maxLength) {
+        maxLength = length;
+        maxTask = taskId;
+      }
+    }
+
+    // Reconstruct the path
+    const path: string[] = [];
+    let current = maxTask;
+    while (current) {
+      path.unshift(current);
+      current = predecessor.get(current) || '';
+    }
+
+    return path;
   }
 }

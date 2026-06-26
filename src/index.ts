@@ -104,7 +104,7 @@ class TaskOrchestratorMCPServer {
           // ============================================================================
           {
             name: 'create_tasks',
-            description: 'Create one or more tasks with optional dependencies and parent tasks. IMPORTANT: For new independent task groups/sessions, strongly prefer using create_workflow instead to keep tasks organized and avoid hanging tasks. When creating tasks outside a workflow context, always include a meaningful sessionId (top-level field, e.g., "bugfix-123", "feature-auth") to group related tasks together. Subtasks created with parentTaskId automatically inherit sessionId from their parent. Duplicate tasks are skipped by default (use deduplication: "none" per task to force creation). Dependencies can be specified as: positional references (task-1, task-2, etc.) within the same batch, existing task IDs, or task names (matched case-insensitively against tasks in this batch and existing tasks). CRITICAL: For parentTaskId, you MUST use actual existing task IDs - create the parent task first, get its ID from the response, then create subtasks using that ID. Do not use positional references or task names for parentTaskId.',
+            description: 'Create one or more tasks with optional dependencies and parent tasks. IMPORTANT: For new independent task groups/sessions, strongly prefer using create_workflow instead to keep tasks organized and avoid hanging tasks. When creating tasks outside a workflow context, always include a meaningful sessionId (top-level field, e.g., "bugfix-123", "feature-auth") to group related tasks together. Subtasks created with parentTaskId automatically inherit sessionId from their parent. Duplicate tasks are skipped by default (use deduplication: "none" per task to force creation). Dependencies can be specified as: positional references (task-1, task-2, etc.) within the same batch, existing task IDs, or task names (matched case-insensitively against tasks in this batch and existing tasks). Dependencies also support a rich object form with type (hard/soft/conditional/external), onFailure policy, condition, url, timeoutMs, and metadata. CRITICAL: For parentTaskId, you MUST use actual existing task IDs - create the parent task first, get its ID from the response, then create subtasks using that ID. Do not use positional references or task names for parentTaskId.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -124,9 +124,32 @@ class TaskOrchestratorMCPServer {
                       dependencies: {
                         type: 'array',
                         items: {
-                          type: 'string'
+                          oneOf: [
+                            { type: 'string', description: 'Task ID, positional reference (task-1, task-2...), or task name' },
+                            {
+                              type: 'object',
+                              properties: {
+                                taskId: { type: 'string', description: 'Task ID, positional reference, or task name' },
+                                type: { type: 'string', enum: ['hard', 'soft', 'conditional', 'external'], description: 'Dependency type' },
+                                onFailure: { type: 'string', enum: ['block', 'skip', 'proceed'], description: 'Policy when dependency fails' },
+                                condition: { type: 'string', description: 'Condition for conditional dependencies' },
+                                url: { type: 'string', description: 'URL for external dependencies' },
+                                timeoutMs: { type: 'number', description: 'Timeout in milliseconds' },
+                                metadata: { type: 'object', description: 'Dependency metadata (reason, createdBy, createdAt, priorityBoost)' }
+                              },
+                              required: ['taskId']
+                            }
+                          ]
                         },
-                        description: 'Array of task IDs, positional references (task-1, task-2...), or task names that this task depends on. Task names are matched case-insensitively against tasks in this batch and existing tasks.'
+                        description: 'Array of dependencies (string shorthand or RichDependency objects)'
+                      },
+                      priority: {
+                        type: 'number',
+                        description: 'Task priority (higher = more important, affects execution order)'
+                      },
+                      order: {
+                        type: 'number',
+                        description: 'Order among siblings (for parent-child relationships)'
                       },
                       parentTaskId: {
                         type: 'string',
@@ -160,7 +183,7 @@ class TaskOrchestratorMCPServer {
           },
           {
             name: 'update_task',
-            description: 'Update an existing task. You can add or update the sessionId in metadata to better organize tasks into sessions.',
+            description: 'Update an existing task. You can add or update the sessionId in metadata to better organize tasks into sessions. Dependencies support both string shorthand and RichDependency objects.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -179,9 +202,32 @@ class TaskOrchestratorMCPServer {
                 dependencies: {
                   type: 'array',
                   items: {
-                    type: 'string'
+                    oneOf: [
+                      { type: 'string', description: 'Task ID, positional reference, or task name' },
+                      {
+                        type: 'object',
+                        properties: {
+                          taskId: { type: 'string', description: 'Task ID, positional reference, or task name' },
+                          type: { type: 'string', enum: ['hard', 'soft', 'conditional', 'external'], description: 'Dependency type' },
+                          onFailure: { type: 'string', enum: ['block', 'skip', 'proceed'], description: 'Policy when dependency fails' },
+                          condition: { type: 'string', description: 'Condition for conditional dependencies' },
+                          url: { type: 'string', description: 'URL for external dependencies' },
+                          timeoutMs: { type: 'number', description: 'Timeout in milliseconds' },
+                          metadata: { type: 'object', description: 'Dependency metadata' }
+                        },
+                        required: ['taskId']
+                      }
+                    ]
                   },
-                  description: 'New dependencies for the task'
+                  description: 'New dependencies for the task (string shorthand or RichDependency objects)'
+                },
+                priority: {
+                  type: 'number',
+                  description: 'Task priority (higher = more important)'
+                },
+                order: {
+                  type: 'number',
+                  description: 'Order among siblings'
                 },
                 parentTaskId: {
                   type: 'string',
@@ -556,6 +602,174 @@ class TaskOrchestratorMCPServer {
                   description: 'Age threshold in milliseconds for stale pending tasks (default 24 hours)'
                 }
               }
+            }
+          },
+          {
+            name: 'add_dependency',
+            description: 'Add a dependency to a task. Supports both string shorthand and RichDependency objects.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                taskId: {
+                  type: 'string',
+                  description: 'The ID of the task to add dependency to'
+                },
+                dependency: {
+                  oneOf: [
+                    { type: 'string', description: 'Task ID, positional reference, or task name' },
+                    {
+                      type: 'object',
+                      properties: {
+                        taskId: { type: 'string', description: 'Task ID, positional reference, or task name' },
+                        type: { type: 'string', enum: ['hard', 'soft', 'conditional', 'external'], description: 'Dependency type' },
+                        onFailure: { type: 'string', enum: ['block', 'skip', 'proceed'], description: 'Policy when dependency fails' },
+                        condition: { type: 'string', description: 'Condition for conditional dependencies' },
+                        url: { type: 'string', description: 'URL for external dependencies' },
+                        timeoutMs: { type: 'number', description: 'Timeout in milliseconds' },
+                        metadata: { type: 'object', description: 'Dependency metadata' }
+                      },
+                      required: ['taskId']
+                    }
+                  ],
+                  description: 'Dependency to add (string shorthand or RichDependency object)'
+                }
+              },
+              required: ['taskId', 'dependency']
+            }
+          },
+          {
+            name: 'remove_dependency',
+            description: 'Remove a dependency from a task',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                taskId: {
+                  type: 'string',
+                  description: 'The ID of the task to remove dependency from'
+                },
+                depTaskId: {
+                  type: 'string',
+                  description: 'The dependency task ID to remove'
+                }
+              },
+              required: ['taskId', 'depTaskId']
+            }
+          },
+          {
+            name: 'update_dependency',
+            description: 'Update an existing dependency on a task',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                taskId: {
+                  type: 'string',
+                  description: 'The ID of the task to update dependency for'
+                },
+                depTaskId: {
+                  type: 'string',
+                  description: 'The dependency task ID to update'
+                },
+                updates: {
+                  type: 'object',
+                  properties: {
+                    type: { type: 'string', enum: ['hard', 'soft', 'conditional', 'external'], description: 'Dependency type' },
+                    onFailure: { type: 'string', enum: ['block', 'skip', 'proceed'], description: 'Policy when dependency fails' },
+                    condition: { type: 'string', description: 'Condition for conditional dependencies' },
+                    url: { type: 'string', description: 'URL for external dependencies' },
+                    timeoutMs: { type: 'number', description: 'Timeout in milliseconds' },
+                    metadata: { type: 'object', description: 'Dependency metadata' }
+                  },
+                  description: 'Partial updates to apply to the dependency'
+                }
+              },
+              required: ['taskId', 'depTaskId']
+            }
+          },
+          {
+            name: 'move_task',
+            description: 'Move a task to a new parent or change its order among siblings',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                taskId: {
+                  type: 'string',
+                  description: 'The ID of the task to move'
+                },
+                newParentTaskId: {
+                  type: 'string',
+                  description: 'New parent task ID (null to remove parent)'
+                },
+                position: {
+                  type: 'number',
+                  description: 'Order position among siblings'
+                }
+              },
+              required: ['taskId']
+            }
+          },
+          {
+            name: 'get_dependency_graph',
+            description: 'Get the dependency graph for a session or workflow. Returns nodes (tasks) and edges (dependencies).',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                sessionId: {
+                  type: 'string',
+                  description: 'Optional session ID to filter by'
+                },
+                workflowId: {
+                  type: 'string',
+                  description: 'Optional workflow ID to filter by'
+                }
+              }
+            }
+          },
+          {
+            name: 'export_mermaid',
+            description: 'Export the dependency graph as a Mermaid flowchart diagram',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                sessionId: {
+                  type: 'string',
+                  description: 'Optional session ID to filter by'
+                },
+                workflowId: {
+                  type: 'string',
+                  description: 'Optional workflow ID to filter by'
+                }
+              }
+            }
+          },
+          {
+            name: 'get_blocked_tasks',
+            description: 'Get blocked tasks with their blocking dependencies',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                sessionId: {
+                  type: 'string',
+                  description: 'Optional session ID to filter by'
+                },
+                workflowId: {
+                  type: 'string',
+                  description: 'Optional workflow ID to filter by'
+                }
+              }
+            }
+          },
+          {
+            name: 'get_critical_path',
+            description: 'Get the critical path for a workflow (longest path of dependencies)',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                workflowId: {
+                  type: 'string',
+                  description: 'Workflow ID to analyze'
+                }
+              },
+              required: ['workflowId']
             }
           }
         ]

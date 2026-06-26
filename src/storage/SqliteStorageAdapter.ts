@@ -51,10 +51,8 @@ export class SqliteStorageAdapter implements IStorageAdapter {
           description TEXT,
           status TEXT NOT NULL,
           dependencies TEXT,
-          soft_dependencies TEXT,
-          dependency_timeouts TEXT,
-          external_dependencies TEXT,
-          conditional_dependencies TEXT,
+          priority INTEGER,
+          order INTEGER,
           parent_task_id TEXT,
           session_id TEXT,
           created_at TEXT NOT NULL,
@@ -143,22 +141,20 @@ export class SqliteStorageAdapter implements IStorageAdapter {
           description: row[2] as string || undefined,
           status: (validStatuses.includes(rawStatus as any) ? rawStatus : 'pending') as Task['status'],
           dependencies: this.safeJsonParse(row[4] as string, [], { table: 'tasks', id: taskId, field: 'dependencies' }),
-          softDependencies: this.safeJsonParse(row[5] as string, undefined, { table: 'tasks', id: taskId, field: 'softDependencies' }),
-          dependencyTimeouts: this.safeJsonParse(row[6] as string, undefined, { table: 'tasks', id: taskId, field: 'dependencyTimeouts' }),
-          externalDependencies: this.safeJsonParse(row[7] as string, undefined, { table: 'tasks', id: taskId, field: 'externalDependencies' }),
-          conditionalDependencies: this.safeJsonParse(row[8] as string, undefined, { table: 'tasks', id: taskId, field: 'conditionalDependencies' }),
-          parentTaskId: row[9] as string || undefined,
-          sessionId: row[10] as string || undefined,
-          createdAt: row[11] as string,
-          updatedAt: row[12] as string,
-          startedAt: row[13] as string || undefined,
-          completedAt: row[14] as string || undefined,
-          retries: row[15] as number || 0,
-          maxRetries: row[16] as number || undefined,
-          timeoutMs: row[17] as number || undefined,
-          result: this.safeJsonParse(row[18] as string, undefined, { table: 'tasks', id: taskId, field: 'result' }),
-          error: row[19] as string || undefined,
-          metadata: this.safeJsonParse(row[20] as string, undefined, { table: 'tasks', id: taskId, field: 'metadata' })
+          priority: row[5] as number || undefined,
+          order: row[6] as number || undefined,
+          parentTaskId: row[7] as string || undefined,
+          sessionId: row[8] as string || undefined,
+          createdAt: row[9] as string,
+          updatedAt: row[10] as string,
+          startedAt: row[11] as string || undefined,
+          completedAt: row[12] as string || undefined,
+          retries: row[13] as number || 0,
+          maxRetries: row[14] as number || undefined,
+          timeoutMs: row[15] as number || undefined,
+          result: this.safeJsonParse(row[16] as string, undefined, { table: 'tasks', id: taskId, field: 'result' }),
+          error: row[17] as string || undefined,
+          metadata: this.safeJsonParse(row[18] as string, undefined, { table: 'tasks', id: taskId, field: 'metadata' })
         };
         tasks.set(task.id, task);
       }
@@ -228,21 +224,18 @@ export class SqliteStorageAdapter implements IStorageAdapter {
       for (const task of state.tasks.values()) {
         this.db!.run(`
           INSERT INTO tasks (
-            id, name, description, status, dependencies, soft_dependencies,
-            dependency_timeouts, external_dependencies, conditional_dependencies,
+            id, name, description, status, dependencies, priority, order,
             parent_task_id, session_id, created_at, updated_at, started_at,
             completed_at, retries, max_retries, timeout_ms, result, error, metadata
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [
           task.id,
           task.name,
           task.description || null,
           task.status,
           JSON.stringify(task.dependencies),
-          task.softDependencies ? JSON.stringify(task.softDependencies) : null,
-          task.dependencyTimeouts ? JSON.stringify(task.dependencyTimeouts) : null,
-          task.externalDependencies ? JSON.stringify(task.externalDependencies) : null,
-          task.conditionalDependencies ? JSON.stringify(task.conditionalDependencies) : null,
+          task.priority || null,
+          task.order || null,
           task.parentTaskId || null,
           task.sessionId || null,
           task.createdAt,

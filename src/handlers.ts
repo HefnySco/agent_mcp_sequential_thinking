@@ -25,7 +25,15 @@ import {
   GetWorkflowRunSchema,
   GetNextWorkflowTasksSchema,
   CleanupWorkflowRunsSchema,
-  CleanupTasksSchema
+  CleanupTasksSchema,
+  AddDependencySchema,
+  RemoveDependencySchema,
+  UpdateDependencySchema,
+  MoveTaskSchema,
+  GetDependencyGraphSchema,
+  ExportMermaidSchema,
+  GetBlockedTasksSchema,
+  GetCriticalPathSchema
 } from './validation.js';
 import { ERROR_MESSAGES } from './constants.js';
 
@@ -137,10 +145,8 @@ export async function handleUpdateTask(
   if (validated.name !== undefined) updates.name = validated.name;
   if (validated.description !== undefined) updates.description = validated.description ?? undefined;
   if (validated.dependencies !== undefined) updates.dependencies = validated.dependencies;
-  if (validated.softDependencies !== undefined) updates.softDependencies = validated.softDependencies;
-  if (validated.dependencyTimeouts !== undefined) updates.dependencyTimeouts = validated.dependencyTimeouts;
-  if (validated.externalDependencies !== undefined) updates.externalDependencies = validated.externalDependencies;
-  if (validated.conditionalDependencies !== undefined) updates.conditionalDependencies = validated.conditionalDependencies;
+  if (validated.priority !== undefined) updates.priority = validated.priority;
+  if (validated.order !== undefined) updates.order = validated.order;
   if (validated.parentTaskId !== undefined) updates.parentTaskId = validated.parentTaskId ?? undefined;
   if (validated.sessionId !== undefined) updates.sessionId = validated.sessionId ?? undefined;
   if (validated.metadata !== undefined) updates.metadata = validated.metadata;
@@ -1190,6 +1196,251 @@ export async function handleGetNextWorkflowTasks(
 }
 
 /**
+ * Add dependency handler
+ */
+export async function handleAddDependency(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = AddDependencySchema.parse(args);
+
+  const task = service.addDependency(validated.taskId, validated.dependency);
+
+  if (!task) {
+    throw new TaskNotFoundError(validated.taskId);
+  }
+
+  await service.forceSave();
+
+  const result = {
+    content: [
+      {
+        type: 'text',
+        text: `✅ Dependency added successfully\n\n**Task ID:** ${validated.taskId}\n**Task Name:** ${task.name}\n**Dependencies:** ${task.dependencies.length}`
+      }
+    ]
+  };
+
+  await logger.logToolRequest('add_dependency', args, result);
+  return result;
+}
+
+/**
+ * Remove dependency handler
+ */
+export async function handleRemoveDependency(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = RemoveDependencySchema.parse(args);
+
+  const task = service.removeDependency(validated.taskId, validated.depTaskId);
+
+  if (!task) {
+    throw new TaskNotFoundError(validated.taskId);
+  }
+
+  await service.forceSave();
+
+  const result = {
+    content: [
+      {
+        type: 'text',
+        text: `✅ Dependency removed successfully\n\n**Task ID:** ${validated.taskId}\n**Task Name:** ${task.name}\n**Removed Dependency:** ${validated.depTaskId}\n**Remaining Dependencies:** ${task.dependencies.length}`
+      }
+    ]
+  };
+
+  await logger.logToolRequest('remove_dependency', args, result);
+  return result;
+}
+
+/**
+ * Update dependency handler
+ */
+export async function handleUpdateDependency(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = UpdateDependencySchema.parse(args);
+
+  const task = service.updateDependency(validated.taskId, validated.depTaskId, validated.updates || {});
+
+  if (!task) {
+    throw new TaskNotFoundError(validated.taskId);
+  }
+
+  await service.forceSave();
+
+  const result = {
+    content: [
+      {
+        type: 'text',
+        text: `✅ Dependency updated successfully\n\n**Task ID:** ${validated.taskId}\n**Task Name:** ${task.name}\n**Updated Dependency:** ${validated.depTaskId}`
+      }
+    ]
+  };
+
+  await logger.logToolRequest('update_dependency', args, result);
+  return result;
+}
+
+/**
+ * Move task handler
+ */
+export async function handleMoveTask(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = MoveTaskSchema.parse(args);
+
+  const task = service.moveTask(validated.taskId, validated.newParentTaskId ?? null, validated.position);
+
+  if (!task) {
+    throw new TaskNotFoundError(validated.taskId);
+  }
+
+  await service.forceSave();
+
+  const result = {
+    content: [
+      {
+        type: 'text',
+        text: `✅ Task moved successfully\n\n**Task ID:** ${validated.taskId}\n**Task Name:** ${task.name}\n**New Parent:** ${validated.newParentTaskId || 'None'}\n**Position:** ${validated.position ?? 'Default'}`
+      }
+    ]
+  };
+
+  await logger.logToolRequest('move_task', args, result);
+  return result;
+}
+
+/**
+ * Get dependency graph handler
+ */
+export async function handleGetDependencyGraph(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = GetDependencyGraphSchema.parse(args);
+
+  const graph = service.getDependencyGraph(validated.sessionId, validated.workflowId);
+
+  const nodesText = graph.nodes.map(n => `  - ${n.name} (${n.id}) [${n.status}]`).join('\n');
+  const edgesText = graph.edges.map(e => `  - ${e.from} → ${e.to} (${e.type})`).join('\n');
+
+  const result = {
+    content: [
+      {
+        type: 'text',
+        text: `📊 Dependency Graph\n\n**Nodes (${graph.nodes.length}):**\n${nodesText}\n\n**Edges (${graph.edges.length}):**\n${edgesText}`
+      }
+    ]
+  };
+
+  await logger.logToolRequest('get_dependency_graph', args, result);
+  return result;
+}
+
+/**
+ * Export Mermaid handler
+ */
+export async function handleExportMermaid(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = ExportMermaidSchema.parse(args);
+
+  const mermaid = service.exportMermaid(validated.sessionId, validated.workflowId);
+
+  const result = {
+    content: [
+      {
+        type: 'text',
+        text: `📊 Mermaid Flowchart\n\n\`\`\`mermaid\n${mermaid}\n\`\`\``
+      }
+    ]
+  };
+
+  await logger.logToolRequest('export_mermaid', args, result);
+  return result;
+}
+
+/**
+ * Get blocked tasks handler
+ */
+export async function handleGetBlockedTasks(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = GetBlockedTasksSchema.parse(args);
+
+  const blockedTasks = service.getBlockedTasks(validated.sessionId, validated.workflowId);
+
+  const tasksText = blockedTasks.map(bt => {
+    const depsText = bt.blockingDeps.map(d => `    - ${d}`).join('\n');
+    return `  - **${bt.task.name}** (${bt.task.id})\n    **Blocking Dependencies:**\n${depsText}`;
+  }).join('\n');
+
+  const result = {
+    content: [
+      {
+        type: 'text',
+        text: `🚫 Blocked Tasks - ${blockedTasks.length} tasks\n\n${blockedTasks.length > 0 ? tasksText : 'No blocked tasks'}`
+      }
+    ]
+  };
+
+  await logger.logToolRequest('get_blocked_tasks', args, result);
+  return result;
+}
+
+/**
+ * Get critical path handler
+ */
+export async function handleGetCriticalPath(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = GetCriticalPathSchema.parse(args);
+
+  const criticalPath = service.getCriticalPath(validated.workflowId);
+
+  const pathText = criticalPath.map(taskId => {
+    const task = service.getTask(taskId);
+    return task ? `  - ${task.name} (${task.id})` : `  - ${taskId} (not found)`;
+  }).join('\n');
+
+  const result = {
+    content: [
+      {
+        type: 'text',
+        text: `🛤️ Critical Path - ${criticalPath.length} tasks\n\n**Workflow ID:** ${validated.workflowId}\n**Path Length:** ${criticalPath.length}\n\n**Critical Path:**\n${pathText}`
+      }
+    ]
+  };
+
+  await logger.logToolRequest('get_critical_path', args, result);
+  return result;
+}
+
+/**
  * Handler registry mapping tool names to their handlers
  */
 export const handlerRegistry: Record<string, (context: HandlerContext, args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>> = {
@@ -1220,5 +1471,13 @@ export const handlerRegistry: Record<string, (context: HandlerContext, args: Rec
   save_state: handleSaveState,
   get_version: handleGetVersion,
   cleanup_workflow_runs: handleCleanupWorkflowRuns,
-  cleanup_tasks: handleCleanupTasks
+  cleanup_tasks: handleCleanupTasks,
+  add_dependency: handleAddDependency,
+  remove_dependency: handleRemoveDependency,
+  update_dependency: handleUpdateDependency,
+  move_task: handleMoveTask,
+  get_dependency_graph: handleGetDependencyGraph,
+  export_mermaid: handleExportMermaid,
+  get_blocked_tasks: handleGetBlockedTasks,
+  get_critical_path: handleGetCriticalPath
 };

@@ -415,5 +415,184 @@ for (const testCase of testCases) {
         assert.ok(run!.readyTasks.some(t => t.id === task2.id));
       });
     });
+
+    describe('Sequential Task Completion with Dependencies', () => {
+      it('should allow completing tasks with dependencies one by one without errors', () => {
+        // Create a chain of tasks: task1 -> task2 -> task3
+        const task1 = service.createTask({ name: 'Task 1' });
+        const task2 = service.createTask({ 
+          name: 'Task 2', 
+          dependencies: [{ taskId: task1.id, type: 'hard' }] 
+        });
+        const task3 = service.createTask({ 
+          name: 'Task 3', 
+          dependencies: [{ taskId: task2.id, type: 'hard' }] 
+        });
+
+        // Initially, only task1 should be executable
+        let check1 = service.canExecuteTask(task1.id);
+        let check2 = service.canExecuteTask(task2.id);
+        let check3 = service.canExecuteTask(task3.id);
+
+        assert.strictEqual(check1.canExecute, true, 'Task 1 should be executable initially');
+        assert.strictEqual(check2.canExecute, false, 'Task 2 should not be executable initially');
+        assert.strictEqual(check3.canExecute, false, 'Task 3 should not be executable initially');
+
+        // Complete task1
+        service.executeTask(task1.id);
+        const task1After = service.getTask(task1.id);
+        assert.strictEqual(task1After?.status, TASK_STATUS.COMPLETED);
+
+        // Now task2 should be executable
+        check2 = service.canExecuteTask(task2.id);
+        assert.strictEqual(check2.canExecute, true, 'Task 2 should be executable after task1 completes');
+        check3 = service.canExecuteTask(task3.id);
+        assert.strictEqual(check3.canExecute, false, 'Task 3 should still not be executable');
+
+        // Complete task2
+        service.executeTask(task2.id);
+        const task2After = service.getTask(task2.id);
+        assert.strictEqual(task2After?.status, TASK_STATUS.COMPLETED);
+
+        // Now task3 should be executable
+        check3 = service.canExecuteTask(task3.id);
+        assert.strictEqual(check3.canExecute, true, 'Task 3 should be executable after task2 completes');
+
+        // Complete task3
+        service.executeTask(task3.id);
+        const task3After = service.getTask(task3.id);
+        assert.strictEqual(task3After?.status, TASK_STATUS.COMPLETED);
+
+        // All tasks should be completed without any dependency errors
+        assert.strictEqual(task1After?.status, TASK_STATUS.COMPLETED);
+        assert.strictEqual(task2After?.status, TASK_STATUS.COMPLETED);
+        assert.strictEqual(task3After?.status, TASK_STATUS.COMPLETED);
+      });
+
+      it('should handle complex dependency graph with multiple branches', () => {
+        // Create a diamond dependency graph:
+        //     task1
+        //    /     \
+        // task2   task3
+        //    \     /
+        //     task4
+        const task1 = service.createTask({ name: 'Task 1' });
+        const task2 = service.createTask({ 
+          name: 'Task 2', 
+          dependencies: [{ taskId: task1.id, type: 'hard' }] 
+        });
+        const task3 = service.createTask({ 
+          name: 'Task 3', 
+          dependencies: [{ taskId: task1.id, type: 'hard' }] 
+        });
+        const task4 = service.createTask({ 
+          name: 'Task 4', 
+          dependencies: [
+            { taskId: task2.id, type: 'hard' },
+            { taskId: task3.id, type: 'hard' }
+          ] 
+        });
+
+        // Initially, only task1 should be executable
+        assert.strictEqual(service.canExecuteTask(task1.id).canExecute, true);
+        assert.strictEqual(service.canExecuteTask(task2.id).canExecute, false);
+        assert.strictEqual(service.canExecuteTask(task3.id).canExecute, false);
+        assert.strictEqual(service.canExecuteTask(task4.id).canExecute, false);
+
+        // Complete task1
+        service.executeTask(task1.id);
+        assert.strictEqual(service.getTask(task1.id)?.status, TASK_STATUS.COMPLETED);
+
+        // Now task2 and task3 should be executable
+        assert.strictEqual(service.canExecuteTask(task2.id).canExecute, true);
+        assert.strictEqual(service.canExecuteTask(task3.id).canExecute, true);
+        assert.strictEqual(service.canExecuteTask(task4.id).canExecute, false);
+
+        // Complete task2
+        service.executeTask(task2.id);
+        assert.strictEqual(service.getTask(task2.id)?.status, TASK_STATUS.COMPLETED);
+
+        // task4 still not executable (task3 not completed)
+        assert.strictEqual(service.canExecuteTask(task4.id).canExecute, false);
+
+        // Complete task3
+        service.executeTask(task3.id);
+        assert.strictEqual(service.getTask(task3.id)?.status, TASK_STATUS.COMPLETED);
+
+        // Now task4 should be executable
+        assert.strictEqual(service.canExecuteTask(task4.id).canExecute, true);
+
+        // Complete task4
+        service.executeTask(task4.id);
+        assert.strictEqual(service.getTask(task4.id)?.status, TASK_STATUS.COMPLETED);
+
+        // All tasks completed without errors
+        assert.strictEqual(service.getTask(task1.id)?.status, TASK_STATUS.COMPLETED);
+        assert.strictEqual(service.getTask(task2.id)?.status, TASK_STATUS.COMPLETED);
+        assert.strictEqual(service.getTask(task3.id)?.status, TASK_STATUS.COMPLETED);
+        assert.strictEqual(service.getTask(task4.id)?.status, TASK_STATUS.COMPLETED);
+      });
+
+      it('should handle tasks with mixed hard and soft dependencies', () => {
+        // task1 (no deps)
+        // task2 (hard dep on task1)
+        // task3 (soft dep on task1)
+        // task4 (hard dep on task2, soft dep on task3)
+        const task1 = service.createTask({ name: 'Task 1' });
+        const task2 = service.createTask({ 
+          name: 'Task 2', 
+          dependencies: [{ taskId: task1.id, type: 'hard' }] 
+        });
+        const task3 = service.createTask({ 
+          name: 'Task 3', 
+          dependencies: [{ taskId: task1.id, type: 'soft' }] 
+        });
+        const task4 = service.createTask({ 
+          name: 'Task 4', 
+          dependencies: [
+            { taskId: task2.id, type: 'hard' },
+            { taskId: task3.id, type: 'soft' }
+          ] 
+        });
+
+        // Initially, only task1 and task3 should be executable (soft deps don't block)
+        assert.strictEqual(service.canExecuteTask(task1.id).canExecute, true);
+        assert.strictEqual(service.canExecuteTask(task2.id).canExecute, false);
+        assert.strictEqual(service.canExecuteTask(task3.id).canExecute, true);
+        assert.strictEqual(service.canExecuteTask(task4.id).canExecute, false);
+
+        // Complete task1
+        service.executeTask(task1.id);
+        assert.strictEqual(service.getTask(task1.id)?.status, TASK_STATUS.COMPLETED);
+
+        // Now task2 should be executable, task3 still executable
+        assert.strictEqual(service.canExecuteTask(task2.id).canExecute, true);
+        assert.strictEqual(service.canExecuteTask(task3.id).canExecute, true);
+        assert.strictEqual(service.canExecuteTask(task4.id).canExecute, false);
+
+        // Complete task2
+        service.executeTask(task2.id);
+        assert.strictEqual(service.getTask(task2.id)?.status, TASK_STATUS.COMPLETED);
+
+        // task4 still not executable (hard dep on task2 met, but task2 is completed)
+        // Actually task4 should now be executable since task2 (hard dep) is completed
+        // task3 is soft dep, so it doesn't block
+        assert.strictEqual(service.canExecuteTask(task4.id).canExecute, true);
+
+        // Complete task4
+        service.executeTask(task4.id);
+        assert.strictEqual(service.getTask(task4.id)?.status, TASK_STATUS.COMPLETED);
+
+        // Complete task3 (can complete out of order since it has no hard deps blocking it)
+        service.executeTask(task3.id);
+        assert.strictEqual(service.getTask(task3.id)?.status, TASK_STATUS.COMPLETED);
+
+        // All tasks completed without errors
+        assert.strictEqual(service.getTask(task1.id)?.status, TASK_STATUS.COMPLETED);
+        assert.strictEqual(service.getTask(task2.id)?.status, TASK_STATUS.COMPLETED);
+        assert.strictEqual(service.getTask(task3.id)?.status, TASK_STATUS.COMPLETED);
+        assert.strictEqual(service.getTask(task4.id)?.status, TASK_STATUS.COMPLETED);
+      });
+    });
   });
 }

@@ -7,6 +7,7 @@ import {
   TaskExecutionError
 } from './errors.js';
 import type { Task } from './types.js';
+import { renderMermaid } from './utils/mermaidRenderer.js';
 import {
   CreateTaskSchema,
   CreateTasksSchema,
@@ -32,6 +33,7 @@ import {
   MoveTaskSchema,
   GetDependencyGraphSchema,
   ExportMermaidSchema,
+  ExportGraphImageSchema,
   GetBlockedTasksSchema,
   GetCriticalPathSchema
 } from './validation.js';
@@ -1295,24 +1297,80 @@ export async function handleGetDependencyGraph(
 export async function handleExportMermaid(
   context: HandlerContext,
   args: Record<string, unknown>
-): Promise<{ content: Array<{ type: string; text: string }> }> {
+): Promise<{ content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> }> {
   const { service, logger } = context;
 
   const validated = ExportMermaidSchema.parse(args);
 
   const mermaid = service.exportMermaid(validated.workflowId);
 
-  const result = {
-    content: [
-      {
-        type: 'text',
-        text: `📊 Mermaid Flowchart\n\n\`\`\`mermaid\n${mermaid}\n\`\`\``
-      }
-    ]
-  };
+  // If format is mmd, return text as before
+  if (validated.format === 'mmd') {
+    const result = {
+      content: [
+        {
+          type: 'text',
+          text: `📊 Mermaid Flowchart\n\n\`\`\`mermaid\n${mermaid}\n\`\`\``
+        }
+      ]
+    };
 
-  await logger.logToolRequest('export_mermaid', args, result);
-  return result;
+    await logger.logToolRequest('export_mermaid', args, result);
+    return result;
+  }
+
+  // Render to PNG or SVG
+  try {
+    const rendered = await renderMermaid(mermaid, validated.format);
+
+    const result = {
+      content: [
+        {
+          type: 'image',
+          data: rendered.data,
+          mimeType: rendered.mimeType
+        }
+      ]
+    };
+
+    await logger.logToolRequest('export_mermaid', args, result);
+    return result;
+  } catch (error) {
+    throw new Error(`Failed to render Mermaid diagram: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/**
+ * Export graph image handler (dedicated tool for image export)
+ */
+export async function handleExportGraphImage(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; data: string; mimeType: string }> }> {
+  const { service, logger } = context;
+
+  const validated = ExportGraphImageSchema.parse(args);
+
+  const mermaid = service.exportMermaid(validated.workflowId);
+
+  try {
+    const rendered = await renderMermaid(mermaid, validated.format);
+
+    const result = {
+      content: [
+        {
+          type: 'image',
+          data: rendered.data,
+          mimeType: rendered.mimeType
+        }
+      ]
+    };
+
+    await logger.logToolRequest('export_graph_image', args, result);
+    return result;
+  } catch (error) {
+    throw new Error(`Failed to render graph image: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /**
@@ -1380,7 +1438,7 @@ export async function handleGetCriticalPath(
 /**
  * Handler registry mapping tool names to their handlers
  */
-export const handlerRegistry: Record<string, (context: HandlerContext, args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>> = {
+export const handlerRegistry: Record<string, (context: HandlerContext, args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> }>> = {
   create_tasks: handleCreateTasks,
   update_task: handleUpdateTask,
   delete_task: handleDeleteTask,
@@ -1415,6 +1473,7 @@ export const handlerRegistry: Record<string, (context: HandlerContext, args: Rec
   move_task: handleMoveTask,
   get_dependency_graph: handleGetDependencyGraph,
   export_mermaid: handleExportMermaid,
+  export_graph_image: handleExportGraphImage,
   get_blocked_tasks: handleGetBlockedTasks,
   get_critical_path: handleGetCriticalPath
 };

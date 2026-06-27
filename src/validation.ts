@@ -271,7 +271,16 @@ export const GetDependencyGraphSchema = z.object({
  * Zod schema for exporting Mermaid diagram
  */
 export const ExportMermaidSchema = z.object({
-  workflowId: z.string().optional()
+  workflowId: z.string().optional(),
+  format: z.enum(['mmd', 'png', 'svg']).default('png')
+});
+
+/**
+ * Zod schema for exporting graph as image
+ */
+export const ExportGraphImageSchema = z.object({
+  workflowId: z.string().optional(),
+  format: z.enum(['png', 'svg']).default('png')
 });
 
 /**

@@ -718,13 +718,36 @@ class TaskOrchestratorMCPServer {
           },
           {
             name: 'export_mermaid',
-            description: 'Export the dependency graph as a Mermaid flowchart diagram',
+            description: 'Export the dependency graph as a Mermaid flowchart diagram. **Generates an image (PNG) by default for display in the LLM chat.** Supports text (mmd), PNG, and SVG formats.',
             inputSchema: {
               type: 'object',
               properties: {
                 workflowId: {
                   type: 'string',
                   description: 'Optional workflow ID to filter by'
+                },
+                format: {
+                  type: 'string',
+                  enum: ['mmd', 'png', 'svg'],
+                  description: 'Output format: mmd for raw text (default), png for image, svg for vector'
+                }
+              }
+            }
+          },
+          {
+            name: 'export_graph_image',
+            description: 'Export the dependency graph as a rendered image (PNG or SVG). This is a dedicated tool for image-only output.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                workflowId: {
+                  type: 'string',
+                  description: 'Optional workflow ID to filter by'
+                },
+                format: {
+                  type: 'string',
+                  enum: ['png', 'svg'],
+                  description: 'Output format: png for raster image, svg for vector (default: png)'
                 }
               }
             }

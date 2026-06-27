@@ -364,10 +364,33 @@ Get the dependency graph for a workflow. Returns nodes (tasks) and edges (depend
 - `workflowId` (optional): Workflow ID to filter by
 
 ### `export_mermaid`
-Export the dependency graph as a Mermaid flowchart diagram.
+Export the dependency graph as a Mermaid flowchart diagram. **This tool generates an image that is displayed in the LLM chat agent.**
 
 **Parameters:**
 - `workflowId` (optional): Workflow ID to filter by
+- `format` (optional): Output format - `mmd` (text), `png` (image), or `svg` (vector). Default: `mmd`
+
+**When to Use:**
+- After creating or significantly changing a workflow with multiple tasks and dependencies
+- When the task structure is getting complex or hard to track
+- When the user asks to show the workflow or "visualize the tasks"
+- Before making major structural changes (to understand the current state)
+- When reviewing the critical path or blocked tasks visually
+
+**Best Practices:**
+- **Use `format: "png"`** in most cases for the best visual experience in the LLM chat
+- Proactively export as image when the workflow becomes non-trivial (more than 5-6 tasks or has several dependencies)
+- Do not ask the user "do you want me to export the graph?" — just do it when it adds value
+- If the user says "show me the workflow", "visualize the tasks", "export as image", or "show the graph" → immediately call `export_mermaid` with `format: "png"`
+- After exporting the image, provide a short textual summary of the current state if helpful
+
+**Example:**
+```json
+{
+  "workflowId": "workflow-123",
+  "format": "png"
+}
+```
 
 ### `get_blocked_tasks`
 Get blocked tasks with their blocking dependencies.

@@ -43,6 +43,7 @@ export interface Task {
   result?: unknown;
   error?: string;
   metadata?: Record<string, unknown>;
+  qualifiedName?: string;   // Populated only in WorkflowBundle exports for readability
 }
 
 /**
@@ -241,4 +242,10 @@ export interface WorkflowBundle {
   exportedAt: string;
   templateName?: string;
   tags?: string[];
+  /** Maps qualified names to task IDs for human-readable references */
+  nameToIdMap?: Record<string, string>;
+  /** Maps task IDs to qualified names for reverse lookup */
+  idToNameMap?: Record<string, string>;
+  /** If true, export simplified human-readable view (IDs still preserved) */
+  humanReadableOnly?: boolean;
 }

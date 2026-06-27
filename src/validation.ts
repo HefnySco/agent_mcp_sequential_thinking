@@ -302,7 +302,9 @@ export const GetCriticalPathSchema = z.object({
  */
 export const ExportWorkflowBundleSchema = z.object({
   workflowId: z.string().min(1, 'Workflow ID is required'),
-  includeRuns: z.boolean().optional()
+  includeRuns: z.boolean().optional(),
+  humanReadableOnly: z.boolean().optional(),
+  filePath: z.string().optional()
 });
 
 /**
@@ -343,8 +345,12 @@ export const ImportWorkflowBundleSchema = z.object({
     version: z.string().min(1, 'Bundle version is required'),
     exportedAt: z.string(),
     templateName: z.string().optional(),
-    tags: z.array(z.string()).optional()
+    tags: z.array(z.string()).optional(),
+    nameToIdMap: z.record(z.string(), z.string()).optional(),
+    idToNameMap: z.record(z.string(), z.string()).optional(),
+    humanReadableOnly: z.boolean().optional()
   }),
   namePrefix: z.string().optional(),
-  deduplication: DeduplicationStrategySchema
+  deduplication: DeduplicationStrategySchema,
+  nameRemapping: z.record(z.string(), z.string()).optional()
 });

@@ -1449,14 +1449,36 @@ export async function handleExportWorkflowBundle(
   const validated = ExportWorkflowBundleSchema.parse(args);
 
   const bundle = service.exportWorkflowBundle(validated.workflowId, {
-    includeRuns: validated.includeRuns
+    includeRuns: validated.includeRuns,
+    humanReadableOnly: validated.humanReadableOnly
   });
+
+  // Save to file if filePath is provided
+  let fileSavedMessage = '';
+  if (validated.filePath) {
+    try {
+      const fs = await import('fs/promises');
+      await fs.writeFile(validated.filePath, JSON.stringify(bundle, null, 2), 'utf-8');
+      fileSavedMessage = `\n**File Saved:** ${validated.filePath}`;
+    } catch (error) {
+      fileSavedMessage = `\n**Error saving file:** ${error instanceof Error ? error.message : 'Unknown error'}`;
+    }
+  }
+
+  // Build name map summary for display
+  const nameMapSummary = bundle.nameToIdMap 
+    ? `\n**Name Map (sample):**\n${Object.entries(bundle.nameToIdMap).slice(0, 5).map(([name, id]) => `  ${name} → ${id}`).join('\n')}${Object.keys(bundle.nameToIdMap).length > 5 ? '\n  ...' : ''}`
+    : '';
+
+  const bundleJson = validated.filePath 
+    ? '(Bundle saved to file - use import_workflow_bundle to restore)'
+    : JSON.stringify(bundle, null, 2);
 
   const result = {
     content: [
       {
         type: 'text',
-        text: `📦 Workflow Bundle Exported Successfully\n\n**Workflow Name:** ${bundle.templateName || bundle.workflow.name}\n**Bundle Version:** ${bundle.version}\n**Exported At:** ${bundle.exportedAt}\n**Tasks Included:** ${bundle.tasks.length}\n**Tags:** ${bundle.tags?.join(', ') || 'None'}\n\n**Full Bundle (JSON):**\n\`\`\`json\n${JSON.stringify(bundle, null, 2)}\n\`\`\`\n\n**Usage:**\nSave this JSON to a file and use import_workflow_bundle to restore it in a new session.`
+        text: `📦 Workflow Bundle Exported Successfully\n\n**Workflow Name:** ${bundle.templateName || bundle.workflow.name}\n**Bundle Version:** ${bundle.version}\n**Exported At:** ${bundle.exportedAt}\n**Tasks Included:** ${bundle.tasks.length}\n**Tags:** ${bundle.tags?.join(', ') || 'None'}\n**Human Readable Only:** ${bundle.humanReadableOnly ? 'Yes' : 'No'}${nameMapSummary}${fileSavedMessage}\n\n**Full Bundle (JSON):**\n\`\`\`json\n${bundleJson}\n\`\`\`\n\n**Usage:**\n${validated.filePath ? `File saved to ${validated.filePath}. Use import_workflow_bundle to restore it in a new session.` : 'Save this JSON to a file and use import_workflow_bundle to restore it in a new session.'}`
       }
     ]
   };
@@ -1478,16 +1500,25 @@ export async function handleImportWorkflowBundle(
 
   const importResult = service.importWorkflowBundle(validated.bundle, {
     namePrefix: validated.namePrefix,
-    deduplication: validated.deduplication
+    deduplication: validated.deduplication,
+    nameRemapping: validated.nameRemapping
   });
 
   const workflow = service.getWorkflow(importResult.newWorkflowId);
+
+  // Build name-aware mapping summary if bundle has name maps
+  const mappingSummary = validated.bundle.idToNameMap
+    ? Object.entries(importResult.taskIdMap).slice(0, 5).map(([oldId, newId]) => {
+        const qualifiedName = validated.bundle.idToNameMap?.[oldId] || oldId;
+        return `  ${qualifiedName} → ${newId}`;
+      }).join('\n') + (Object.keys(importResult.taskIdMap).length > 5 ? '\n  ...' : '')
+    : Object.entries(importResult.taskIdMap).slice(0, 5).map(([oldId, newId]) => `  ${oldId} → ${newId}`).join('\n') + (Object.keys(importResult.taskIdMap).length > 5 ? '\n  ...' : '');
 
   const result = {
     content: [
       {
         type: 'text',
-        text: `📦 Workflow Bundle Imported Successfully\n\n**New Workflow ID:** ${importResult.newWorkflowId}\n**Workflow Name:** ${workflow?.name || 'Unknown'}\n**Tasks Imported:** ${Object.keys(importResult.taskIdMap).length}\n**Name Prefix:** ${validated.namePrefix || 'None'}\n**Deduplication Strategy:** ${validated.deduplication || 'none'}\n\n**Task ID Mapping:**\n${Object.entries(importResult.taskIdMap).map(([oldId, newId]) => `  ${oldId} → ${newId}`).join('\n')}\n\n**Next Steps:**\n- Use start_workflow_execution to begin executing the imported workflow\n- Or use list_tasks to see all imported tasks`
+        text: `📦 Workflow Bundle Imported Successfully\n\n**New Workflow ID:** ${importResult.newWorkflowId}\n**Workflow Name:** ${workflow?.name || 'Unknown'}\n**Tasks Imported:** ${Object.keys(importResult.taskIdMap).length}\n**Name Prefix:** ${validated.namePrefix || 'None'}\n**Deduplication Strategy:** ${validated.deduplication || 'none'}\n**Name Remapping:** ${validated.nameRemapping ? `${Object.keys(validated.nameRemapping).length} tasks remapped` : 'None'}\n\n**Task ID Mapping (sample):**\n${mappingSummary}\n\n**Next Steps:**\n- Use start_workflow_execution to begin executing the imported workflow\n- Or use list_tasks to see all imported tasks`
       }
     ]
   };

@@ -2120,13 +2120,62 @@ export class TaskOrchestratorService {
   }
 
   /**
+   * Build a qualified name for a task based on its parent hierarchy
+   * @param taskId - Task ID to build qualified name for
+   * @returns Hierarchical name path (e.g., "ParentTask/ChildTask")
+   */
+  private buildQualifiedName(taskId: string): string {
+    const task = this.state.tasks.get(taskId);
+    if (!task) {
+      return taskId;
+    }
+
+    if (!task.parentTaskId) {
+      return task.name;
+    }
+
+    const parentQualifiedName = this.buildQualifiedName(task.parentTaskId);
+    return `${parentQualifiedName}/${task.name}`;
+  }
+
+  /**
+   * Resolve a task identifier (name or ID) to a task ID
+   * @param identifier - Task name (qualified or simple) or task ID
+   * @param bundle - Workflow bundle for name resolution
+   * @returns Resolved task ID
+   * @throws ValidationError if identifier cannot be resolved
+   */
+  private resolveTaskId(identifier: string, bundle: WorkflowBundle): string {
+    // If it's a UUID format, try direct ID lookup first
+    if (identifier.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)) {
+      const task = bundle.tasks.find(t => t.id === identifier);
+      if (task) {
+        return identifier;
+      }
+    }
+
+    // Try name resolution using nameToIdMap
+    if (bundle.nameToIdMap && bundle.nameToIdMap[identifier]) {
+      return bundle.nameToIdMap[identifier];
+    }
+
+    // Try simple name match (fallback for backward compatibility)
+    const taskByName = bundle.tasks.find(t => t.name === identifier);
+    if (taskByName) {
+      return taskByName.id;
+    }
+
+    throw new ValidationError(`Cannot resolve task identifier '${identifier}' to a task ID`);
+  }
+
+  /**
    * Export a workflow as a portable JSON bundle
    * @param workflowId - Workflow ID to export
    * @param options - Export options
    * @returns WorkflowBundle containing workflow and all related tasks
    * @throws TaskNotFoundError if workflow doesn't exist
    */
-  exportWorkflowBundle(workflowId: string, options: { includeRuns?: boolean } = {}): WorkflowBundle {
+  exportWorkflowBundle(workflowId: string, options: { includeRuns?: boolean; humanReadableOnly?: boolean } = {}): WorkflowBundle {
     const workflow = this.state.workflows.get(workflowId);
     if (!workflow) {
       throw new TaskNotFoundError(workflowId);
@@ -2165,6 +2214,27 @@ export class TaskOrchestratorService {
       ))
     }));
 
+    // Build name maps for human-readable references
+    const nameToIdMap: Record<string, string> = {};
+    const idToNameMap: Record<string, string> = {};
+
+    // Enrich tasks with qualified names and build maps
+    const enrichedTasks = normalizedTasks.map(task => {
+      const qualifiedName = (typeof task.metadata?.qualifiedName === 'string' && task.metadata.qualifiedName) 
+        ? task.metadata.qualifiedName 
+        : this.buildQualifiedName(task.id);
+      nameToIdMap[qualifiedName] = task.id;
+      idToNameMap[task.id] = qualifiedName;
+
+      return {
+        ...task,
+        // Add qualified name as top-level field for readability
+        qualifiedName,
+        // Keep original metadata without duplicating qualifiedName
+        metadata: task.metadata
+      };
+    });
+
     const bundle: WorkflowBundle = {
       workflow: {
         ...workflow,
@@ -2173,11 +2243,14 @@ export class TaskOrchestratorService {
         // Keep taskIds for remapping during import
         taskIds: workflow.taskIds
       },
-      tasks: normalizedTasks,
+      tasks: enrichedTasks,
       version: '1.0.0',
       exportedAt: new Date().toISOString(),
       templateName: workflow.name,
-      tags: workflow.tags
+      tags: workflow.tags,
+      nameToIdMap,
+      idToNameMap,
+      humanReadableOnly: options.humanReadableOnly
     };
 
     return bundle;
@@ -2192,9 +2265,9 @@ export class TaskOrchestratorService {
    */
   importWorkflowBundle(
     bundle: WorkflowBundle,
-    options: { namePrefix?: string; deduplication?: DeduplicationStrategy } = {}
+    options: { namePrefix?: string; deduplication?: DeduplicationStrategy; nameRemapping?: Record<string, string> } = {}
   ): { newWorkflowId: string; taskIdMap: Record<string, string> } {
-    const { namePrefix = '', deduplication = 'none' } = options;
+    const { namePrefix = '', deduplication = 'none', nameRemapping = {} } = options;
 
     // Validate bundle structure
     if (!bundle.workflow || !bundle.tasks || !bundle.version) {
@@ -2205,42 +2278,58 @@ export class TaskOrchestratorService {
     const taskIdMap: Record<string, string> = {};
     const newTasks: CreateTaskInput[] = [];
 
-    // First pass: Create task inputs with remapped parentTaskId
+    // First pass: Generate new IDs for all tasks
     for (const task of bundle.tasks) {
       const newTaskId = this.generateId();
       taskIdMap[task.id] = newTaskId;
+    }
+
+    // Second pass: Create task inputs with remapped dependencies (skip parentTaskId for now)
+    for (const task of bundle.tasks) {
+      // Apply name remapping if provided
+      const taskName = nameRemapping[task.id] || namePrefix + task.name;
+
+      // Remap dependencies
+      const remappedDependencies = task.dependencies.map(dep => {
+        if (typeof dep === 'string') {
+          // Try to resolve string identifier (could be name or ID)
+          try {
+            const resolvedId = this.resolveTaskId(dep, bundle);
+            const mappedId = taskIdMap[resolvedId];
+            if (mappedId) {
+              return mappedId;
+            }
+          } catch {
+            // If resolution fails, try direct ID lookup
+            const mappedId = taskIdMap[dep];
+            if (mappedId) {
+              return mappedId;
+            }
+          }
+          // If all else fails, keep as-is (might be positional reference)
+          return dep;
+        }
+        // Resolve RichDependency taskId (could be name or ID)
+        const newDepTaskId = this.resolveTaskId(dep.taskId, bundle);
+        const mappedId = taskIdMap[newDepTaskId];
+        if (!mappedId) {
+          throw new ValidationError(`Dependency task ID ${dep.taskId} not found in bundle`);
+        }
+        return { ...dep, taskId: mappedId };
+      });
 
       newTasks.push({
-        name: namePrefix + task.name,
+        name: taskName,
         description: task.description,
-        dependencies: task.dependencies.map(dep => ({
-          ...dep,
-          taskId: dep.taskId // Will be remapped in second pass
-        })),
+        dependencies: remappedDependencies,
         priority: task.priority,
         order: task.order,
-        parentTaskId: task.parentTaskId ? taskIdMap[task.parentTaskId] : undefined,
+        parentTaskId: undefined, // Will set after all tasks are created
         metadata: task.metadata,
         maxRetries: task.maxRetries,
         timeoutMs: task.timeoutMs,
         deduplication
       });
-    }
-
-    // Second pass: Remap dependency IDs
-    for (const taskInput of newTasks) {
-      if (taskInput.dependencies) {
-        taskInput.dependencies = taskInput.dependencies.map(dep => {
-          if (typeof dep === 'string') {
-            return dep;
-          }
-          const newDepTaskId = taskIdMap[dep.taskId];
-          if (!newDepTaskId) {
-            throw new ValidationError(`Dependency task ID ${dep.taskId} not found in bundle`);
-          }
-          return { ...dep, taskId: newDepTaskId };
-        });
-      }
     }
 
     // Create tasks using createTasks for proper dependency resolution
@@ -2254,13 +2343,41 @@ export class TaskOrchestratorService {
       finalTaskIdMap[oldId] = newTask.id;
     }
 
-    // Remap workflow task IDs
-    const newWorkflowTaskIds = bundle.workflow.taskIds.map(oldId => {
-      const newId = finalTaskIdMap[oldId];
-      if (!newId) {
-        throw new ValidationError(`Workflow task ID ${oldId} not found in imported tasks`);
+    // Third pass: Remap parentTaskId after tasks are created
+    for (let i = 0; i < bundle.tasks.length; i++) {
+      const bundleTask = bundle.tasks[i];
+      const newTask = createdTasks[i];
+      
+      if (bundleTask.parentTaskId) {
+        const newParentId = finalTaskIdMap[bundleTask.parentTaskId];
+        if (newParentId && newTask.parentTaskId !== newParentId) {
+          // Update the task with the remapped parent ID
+          const updatedTask: Task = {
+            ...newTask,
+            parentTaskId: newParentId
+          };
+          this.state.tasks.set(newTask.id, updatedTask);
+        }
       }
-      return newId;
+    }
+
+    // Remap workflow task IDs (support both names and IDs)
+    const newWorkflowTaskIds = bundle.workflow.taskIds.map(oldId => {
+      try {
+        const resolvedId = this.resolveTaskId(oldId, bundle);
+        const newId = finalTaskIdMap[resolvedId];
+        if (!newId) {
+          throw new ValidationError(`Workflow task ID ${oldId} not found in imported tasks`);
+        }
+        return newId;
+      } catch {
+        // Fallback to direct ID lookup
+        const newId = finalTaskIdMap[oldId];
+        if (!newId) {
+          throw new ValidationError(`Workflow task ID ${oldId} not found in imported tasks`);
+        }
+        return newId;
+      }
     });
 
     // Create the workflow

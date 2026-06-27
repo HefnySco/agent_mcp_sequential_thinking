@@ -240,6 +240,125 @@ for (const testCase of testCases) {
           assert.ok(!originalTaskIds.includes(newId));
         }
       });
+
+      it('should export with hierarchical task names and name maps', () => {
+        const parentTask = service.createTask({ name: 'Parent' });
+        const childTask1 = service.createTask({ name: 'Child1', parentTaskId: parentTask.id });
+        const childTask2 = service.createTask({ name: 'Child2', parentTaskId: parentTask.id });
+
+        const workflow = service.createWorkflow('Hierarchical', [parentTask.id, childTask1.id, childTask2.id]);
+        const bundle = service.exportWorkflowBundle(workflow.id);
+
+        // Verify name maps exist
+        assert.ok(bundle.nameToIdMap);
+        assert.ok(bundle.idToNameMap);
+        assert.strictEqual(Object.keys(bundle.nameToIdMap || {}).length, 3);
+        assert.strictEqual(Object.keys(bundle.idToNameMap || {}).length, 3);
+
+        // Verify qualified names for hierarchical tasks
+        assert.ok(bundle.nameToIdMap?.['Parent']);
+        assert.ok(bundle.nameToIdMap?.['Parent/Child1']);
+        assert.ok(bundle.nameToIdMap?.['Parent/Child2']);
+
+        // Verify tasks have qualifiedName at top level for readability
+        const parentInBundle = bundle.tasks.find(t => t.name === 'Parent');
+        assert.ok(parentInBundle);
+        assert.strictEqual(parentInBundle?.qualifiedName, 'Parent');
+        // qualifiedName should NOT be in metadata (removed for cleanup)
+        assert.strictEqual(parentInBundle?.metadata?.qualifiedName, undefined);
+
+        const child1InBundle = bundle.tasks.find(t => t.name === 'Child1');
+        assert.ok(child1InBundle);
+        assert.strictEqual(child1InBundle?.qualifiedName, 'Parent/Child1');
+        // qualifiedName should NOT be in metadata (removed for cleanup)
+        assert.strictEqual(child1InBundle?.metadata?.qualifiedName, undefined);
+      });
+
+      it('should handle name collisions with different parents', () => {
+        const parent1 = service.createTask({ name: 'Parent1' });
+        const parent2 = service.createTask({ name: 'Parent2' });
+        const child1 = service.createTask({ name: 'Child', parentTaskId: parent1.id });
+        const child2 = service.createTask({ name: 'Child', parentTaskId: parent2.id });
+
+        const workflow = service.createWorkflow('Name Collision', [parent1.id, parent2.id, child1.id, child2.id]);
+        const bundle = service.exportWorkflowBundle(workflow.id);
+
+        // Both qualified names should exist in nameToIdMap
+        assert.ok(bundle.nameToIdMap?.['Parent1/Child']);
+        assert.ok(bundle.nameToIdMap?.['Parent2/Child']);
+
+        // Simple name is not mapped to avoid ambiguity (use qualified names instead)
+        assert.strictEqual(bundle.nameToIdMap?.['Child'], undefined);
+      });
+
+      it('should support humanReadableOnly flag', () => {
+        const task1 = service.createTask({ name: 'Task 1' });
+        const task2 = service.createTask({ name: 'Task 2' });
+
+        const workflow = service.createWorkflow('Readable Test', [task1.id, task2.id]);
+        const bundle = service.exportWorkflowBundle(workflow.id, { humanReadableOnly: true });
+
+        assert.strictEqual(bundle.humanReadableOnly, true);
+        assert.ok(bundle.nameToIdMap);
+        assert.ok(bundle.idToNameMap);
+      });
+
+      it('should support nameRemapping during import', () => {
+        const task1 = service.createTask({ name: 'Original Name 1' });
+        const task2 = service.createTask({ name: 'Original Name 2' });
+
+        const workflow = service.createWorkflow('Remap Test', [task1.id, task2.id]);
+        const bundle = service.exportWorkflowBundle(workflow.id);
+        service.clearAll();
+
+        const importResult = service.importWorkflowBundle(bundle, {
+          nameRemapping: {
+            [task1.id]: 'Renamed Task 1',
+            [task2.id]: 'Renamed Task 2'
+          }
+        });
+
+        const allTasks = service.getAllTasks();
+        assert.strictEqual(allTasks.length, 2);
+        assert.ok(allTasks.some(t => t.name === 'Renamed Task 1'));
+        assert.ok(allTasks.some(t => t.name === 'Renamed Task 2'));
+        assert.ok(!allTasks.some(t => t.name.startsWith('Original Name')));
+      });
+
+      it('should handle roundtrip with name enrichment', () => {
+        const parent = service.createTask({ name: 'Parent' });
+        const child = service.createTask({ name: 'Child', parentTaskId: parent.id });
+
+        const workflow = service.createWorkflow('Roundtrip Enriched', [parent.id, child.id]);
+        const bundle = service.exportWorkflowBundle(workflow.id);
+
+        // Verify enrichment
+        assert.ok(bundle.nameToIdMap);
+        assert.ok(bundle.idToNameMap);
+        assert.strictEqual(bundle.idToNameMap?.[parent.id], 'Parent');
+        assert.strictEqual(bundle.idToNameMap?.[child.id], 'Parent/Child');
+
+        service.clearAll();
+
+        // Import and verify structure preserved
+        const importResult = service.importWorkflowBundle(bundle);
+        const newWorkflow = service.getWorkflow(importResult.newWorkflowId);
+        assert.ok(newWorkflow);
+        assert.strictEqual(newWorkflow?.name, 'Roundtrip Enriched');
+        assert.strictEqual(newWorkflow?.taskIds.length, 2);
+
+        const allTasks = service.getAllTasks();
+        assert.strictEqual(allTasks.length, 2);
+        assert.ok(allTasks.some(t => t.name === 'Parent'));
+        assert.ok(allTasks.some(t => t.name === 'Child'));
+
+        // Verify the child has the correct parent
+        const importedChild = allTasks.find(t => t.name === 'Child');
+        const importedParent = allTasks.find(t => t.name === 'Parent');
+        assert.ok(importedChild);
+        assert.ok(importedParent);
+        assert.strictEqual(importedChild?.parentTaskId, importedParent?.id);
+      });
     });
   });
 }

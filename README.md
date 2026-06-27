@@ -412,6 +412,7 @@ Export a workflow as a portable JSON bundle containing the workflow, all related
 **Parameters:**
 - `workflowId` (required): The ID of the workflow to export
 - `includeRuns` (optional): Whether to include workflow run history (default: false)
+- `humanReadableOnly` (optional): Export simplified human-readable view (default: false)
 
 **Returns:**
 - A JSON bundle containing:
@@ -421,6 +422,12 @@ Export a workflow as a portable JSON bundle containing the workflow, all related
   - `exportedAt`: ISO timestamp when bundle was exported
   - `templateName`: Original workflow name
   - `tags`: Optional tags from the workflow
+  - `nameToIdMap`: Maps qualified names to task IDs for human-readable references
+  - `idToNameMap`: Maps task IDs to qualified names for reverse lookup
+  - `humanReadableOnly`: Flag indicating simplified view
+
+**Name Enrichment:**
+The bundle includes hierarchical qualified names for tasks (e.g., "ParentTask/ChildTask") to make the exported bundle more readable while preserving all original IDs for traceability. Each task also includes a `qualifiedName` field in its metadata.
 
 **Usage Example:**
 ```json
@@ -429,24 +436,72 @@ Export a workflow as a portable JSON bundle containing the workflow, all related
 }
 ```
 
+**Example Bundle with Name Enrichment:**
+```json
+{
+  "workflow": {
+    "name": "CI Pipeline",
+    "taskIds": ["task-1", "task-2"],
+    "version": "1.0.0",
+    "tags": ["ci", "production"]
+  },
+  "tasks": [
+    {
+      "id": "task-1",
+      "name": "Build",
+      "metadata": {
+        "qualifiedName": "Build"
+      },
+      "dependencies": []
+    },
+    {
+      "id": "task-2",
+      "name": "Test",
+      "parentTaskId": "task-1",
+      "metadata": {
+        "qualifiedName": "Build/Test"
+      },
+      "dependencies": ["task-1"]
+    }
+  ],
+  "version": "1.0.0",
+  "exportedAt": "2024-01-01T00:00:00.000Z",
+  "templateName": "CI Pipeline",
+  "nameToIdMap": {
+    "Build": "task-1",
+    "Build/Test": "task-2"
+  },
+  "idToNameMap": {
+    "task-1": "Build",
+    "task-2": "Build/Test"
+  }
+}
+```
+
 **Best Practices:**
 - Export workflows as templates for reuse across projects
 - Save bundles to version control for workflow documentation
 - Use tags to categorize workflow templates
 - Export before major refactoring to preserve workflow structure
+- Use qualified names in `nameToIdMap` for human-readable task references
+- The bundle is fully importable with all original IDs preserved
 
 ### `import_workflow_bundle`
-Import a workflow bundle to create a new workflow. The bundle should be a JSON object containing workflow, tasks, and metadata. All task IDs are remapped during import to avoid conflicts. Supports name prefixing and deduplication strategies.
+Import a workflow bundle to create a new workflow. The bundle should be a JSON object containing workflow, tasks, and metadata. All task IDs are remapped during import to avoid conflicts. Supports name prefixing, deduplication strategies, and name-based resolution.
 
 **Parameters:**
 - `bundle` (required): The workflow bundle to import (JSON object with workflow, tasks, version, exportedAt, etc.)
 - `namePrefix` (optional): Prefix to add to all task and workflow names (useful for avoiding name conflicts)
 - `deduplication` (optional): Deduplication strategy for imported tasks (skip, reuse, error, none; default: none)
+- `nameRemapping` (optional): Map of original task IDs to new task names for custom renaming during import
 
 **Returns:**
 - `newWorkflowId`: ID of the newly created workflow
 - `taskIdMap`: Mapping from original task IDs to new task IDs
 - Workflow name and task count
+
+**Name-Based Resolution:**
+The import process supports both task IDs and qualified names in dependency references. If the bundle includes `nameToIdMap`, you can reference tasks by their hierarchical names (e.g., "ParentTask/ChildTask") instead of IDs. This makes manual bundle editing and customization easier.
 
 **Usage Example:**
 ```json
@@ -475,19 +530,27 @@ Import a workflow bundle to create a new workflow. The bundle should be a JSON o
     "version": "1.0.0",
     "exportedAt": "2024-01-01T00:00:00.000Z",
     "templateName": "CI Pipeline",
-    "tags": ["ci", "production"]
+    "tags": ["ci", "production"],
+    "nameToIdMap": {
+      "Build": "task-1"
+    }
   },
   "namePrefix": "Project A - ",
-  "deduplication": "none"
+  "deduplication": "none",
+  "nameRemapping": {
+    "task-1": "Custom Build Name"
+  }
 }
 ```
 
 **Best Practices:**
 - Use `namePrefix` when importing the same template multiple times to avoid name conflicts
 - Use `deduplication: "skip"` to avoid creating duplicate tasks if similar tasks already exist
+- Use `nameRemapping` to customize task names during import for specific project needs
 - Review the `taskIdMap` to understand how IDs were remapped
 - After import, use `start_workflow_execution` to begin executing the imported workflow
 - Save bundle files in a templates directory for easy reuse
+- The import process is backward compatible with bundles that don't include name maps
 
 **Workflow Template Lifecycle:**
 1. **Export** a working workflow as a template using `export_workflow_bundle`

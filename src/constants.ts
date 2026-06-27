@@ -44,7 +44,7 @@ export const ERROR_MESSAGES = {
  */
 export const SERVER_CONFIG = {
   NAME: 'task-orchestrator',
-  VERSION: '1.1.0',
+  VERSION: '1.1.1',
   DESCRIPTION: 'Task orchestration MCP server with dependency management and workflow support'
 } as const;
 

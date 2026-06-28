@@ -1,5 +1,7 @@
 # ⚡ Task Orchestrator MCP Server
 
+**Version:** 4.6.0
+
 **Task Orchestrator MCP** is a powerful task orchestration server designed specifically to enhance LLM agents. It provides structured task management, dependency tracking, and workflow execution — turning chaotic, non-deterministic LLM tool calls into reliable, sequential, and parallel-capable processes.
 
 Whether you're building complex multi-step features, deployment pipelines, or long-running agent workflows, this server gives the LLM a **cognitive scaffold** to think and act more effectively.

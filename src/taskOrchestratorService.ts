@@ -12,13 +12,16 @@ import type {
   RichDependency,
   ReadinessScore,
   WorkflowBundle,
-  DeduplicationStrategy
+  DeduplicationStrategy,
+  Strategy
 } from './types.js';
 import {
   StorageError,
   TaskNotFoundError,
   DependencyNotFoundError,
-  ValidationError
+  ValidationError,
+  WorkflowNotFoundError,
+  StrategyNotFoundError
 } from './errors.js';
 import { TASK_STATUS } from './constants.js';
 import { getConfigManager } from './config.js';
@@ -43,9 +46,10 @@ export class TaskOrchestratorService {
     this.state = {
       tasks: new Map(),
       workflows: new Map(),
-      workflowRuns: new Map()
+      workflowRuns: new Map(),
+      strategies: new Map()
     };
-    
+
     const config = getConfigManager();
     this.autoSave = config.isAutoSaveEnabled();
     this.saveDebounceMs = config.getSaveDebounceMs();
@@ -820,6 +824,255 @@ export class TaskOrchestratorService {
       this.triggerSave();
     }
     return deleted;
+  }
+
+  // ============================================================================
+  // STRATEGY METHODS
+  // ============================================================================
+
+  /**
+   * Create a new strategy
+   * @param name - Strategy name (must be unique)
+   * @param description - Optional description
+   * @param tags - Optional tags
+   * @returns The created strategy
+   * @throws ValidationError if strategy name already exists
+   */
+  createStrategy(name: string, description?: string, tags?: string[]): Strategy {
+    // Check for duplicate name (case-insensitive)
+    for (const strategy of this.state.strategies.values()) {
+      if (strategy.name.toLowerCase() === name.toLowerCase()) {
+        throw new ValidationError(`Strategy with name '${name}' already exists`);
+      }
+    }
+
+    const id = this.generateId(name);
+    const now = new Date().toISOString();
+
+    const strategy: Strategy = {
+      id,
+      name,
+      description,
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+      tags
+    };
+
+    this.state.strategies.set(id, strategy);
+    this.triggerSave();
+    return strategy;
+  }
+
+  /**
+   * Get a strategy by ID
+   * @param id - Strategy ID
+   * @returns Strategy or undefined if not found
+   */
+  getStrategy(id: string): Strategy | undefined {
+    return this.state.strategies.get(id);
+  }
+
+  /**
+   * Get a strategy by name (case-insensitive)
+   * @param name - Strategy name
+   * @returns Strategy or undefined if not found
+   */
+  getStrategyByName(name: string): Strategy | undefined {
+    for (const strategy of this.state.strategies.values()) {
+      if (strategy.name.toLowerCase() === name.toLowerCase()) {
+        return strategy;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Get all strategies
+   * @returns Object mapping strategy IDs to strategy objects
+   */
+  getAllStrategies(): Record<string, Strategy> {
+    return Object.fromEntries(this.state.strategies);
+  }
+
+  /**
+   * Update a strategy
+   * @param id - Strategy ID
+   * @param updates - Partial strategy updates
+   * @returns The updated strategy or null if not found
+   * @throws ValidationError if name collision occurs
+   */
+  updateStrategy(id: string, updates: Partial<Strategy>): Strategy | null {
+    const strategy = this.state.strategies.get(id);
+    if (!strategy) return null;
+
+    // Check for name collision if name is being updated
+    if (updates.name && updates.name.toLowerCase() !== strategy.name.toLowerCase()) {
+      for (const existingStrategy of this.state.strategies.values()) {
+        if (existingStrategy.id !== id && existingStrategy.name.toLowerCase() === updates.name.toLowerCase()) {
+          throw new ValidationError(`Strategy with name '${updates.name}' already exists`);
+        }
+      }
+    }
+
+    const updatedStrategy: Strategy = {
+      ...strategy,
+      ...updates,
+      id,
+      updatedAt: new Date().toISOString()
+    };
+
+    this.state.strategies.set(id, updatedStrategy);
+    this.triggerSave();
+    return updatedStrategy;
+  }
+
+  /**
+   * Delete a strategy
+   * @param id - Strategy ID
+   * @returns True if strategy was deleted, false if not found
+   */
+  deleteStrategy(id: string): boolean {
+    const strategy = this.state.strategies.get(id);
+    if (!strategy) return false;
+
+    // Ungroup all workflows in this strategy
+    for (const workflow of this.state.workflows.values()) {
+      if (workflow.strategyId === id) {
+        workflow.strategyId = undefined;
+      }
+    }
+
+    const deleted = this.state.strategies.delete(id);
+    if (deleted) {
+      this.triggerSave();
+    }
+    return deleted;
+  }
+
+  /**
+   * Resolve strategy identifier (ID or name)
+   * @param identifier - Strategy ID or name
+   * @returns Strategy or undefined if not found
+   */
+  resolveStrategyIdentifier(identifier: string): Strategy | undefined {
+    // Try ID first
+    const byId = this.state.strategies.get(identifier);
+    if (byId) return byId;
+
+    // Try name (case-insensitive)
+    return this.getStrategyByName(identifier);
+  }
+
+  /**
+   * Move a workflow to a strategy
+   * @param workflowId - Workflow ID
+   * @param strategyId - Strategy ID or name
+   * @returns The updated workflow
+   * @throws WorkflowNotFoundError if workflow doesn't exist
+   * @throws StrategyNotFoundError if strategy doesn't exist
+   */
+  moveWorkflowToStrategy(workflowId: string, strategyId: string): Workflow {
+    const workflow = this.state.workflows.get(workflowId);
+    if (!workflow) {
+      throw new WorkflowNotFoundError(workflowId);
+    }
+
+    const strategy = this.resolveStrategyIdentifier(strategyId);
+    if (!strategy) {
+      throw new StrategyNotFoundError(strategyId);
+    }
+
+    workflow.strategyId = strategy.id;
+    workflow.updatedAt = new Date().toISOString();
+    this.triggerSave();
+    return workflow;
+  }
+
+  /**
+   * Remove a workflow from its strategy
+   * @param workflowId - Workflow ID
+   * @returns The updated workflow
+   * @throws WorkflowNotFoundError if workflow doesn't exist
+   */
+  removeWorkflowFromStrategy(workflowId: string): Workflow {
+    const workflow = this.state.workflows.get(workflowId);
+    if (!workflow) {
+      throw new WorkflowNotFoundError(workflowId);
+    }
+
+    workflow.strategyId = undefined;
+    workflow.updatedAt = new Date().toISOString();
+    this.triggerSave();
+    return workflow;
+  }
+
+  /**
+   * Clone a workflow to a strategy
+   * @param workflowId - Source workflow ID
+   * @param strategyId - Target strategy ID or name
+   * @param options - Optional name prefix
+   * @returns Object with new workflow and task ID mapping
+   * @throws WorkflowNotFoundError if source workflow doesn't exist
+   * @throws StrategyNotFoundError if target strategy doesn't exist
+   */
+  cloneWorkflowToStrategy(
+    workflowId: string,
+    strategyId: string,
+    options: { namePrefix?: string } = {}
+  ): { workflow: Workflow; taskIdMap: Record<string, string> } {
+    const sourceWorkflow = this.state.workflows.get(workflowId);
+    if (!sourceWorkflow) {
+      throw new WorkflowNotFoundError(workflowId);
+    }
+
+    const strategy = this.resolveStrategyIdentifier(strategyId);
+    if (!strategy) {
+      throw new StrategyNotFoundError(strategyId);
+    }
+
+    // Export the workflow as a bundle
+    const bundle = this.exportWorkflowBundle(workflowId);
+
+    // Import the bundle with new IDs
+    const importResult = this.importWorkflowBundle(bundle, {
+      namePrefix: options.namePrefix,
+      deduplication: 'none'
+    });
+
+    // Set the new workflow's strategyId
+    const newWorkflow = this.state.workflows.get(importResult.newWorkflowId);
+    if (newWorkflow) {
+      newWorkflow.strategyId = strategy.id;
+      newWorkflow.updatedAt = new Date().toISOString();
+      this.triggerSave();
+    }
+
+    return {
+      workflow: newWorkflow!,
+      taskIdMap: importResult.taskIdMap
+    };
+  }
+
+  /**
+   * Get all workflows belonging to a strategy
+   * @param strategyId - Strategy ID or name
+   * @returns Array of workflows in the strategy
+   * @throws StrategyNotFoundError if strategy doesn't exist
+   */
+  getWorkflowsByStrategy(strategyId: string): Workflow[] {
+    const strategy = this.resolveStrategyIdentifier(strategyId);
+    if (!strategy) {
+      throw new StrategyNotFoundError(strategyId);
+    }
+
+    const workflows: Workflow[] = [];
+    for (const workflow of this.state.workflows.values()) {
+      if (workflow.strategyId === strategy.id) {
+        workflows.push(workflow);
+      }
+    }
+    return workflows;
   }
 
   /**
@@ -2151,36 +2404,257 @@ export class TaskOrchestratorService {
   }
 
   /**
-   * Export the dependency graph as a Mermaid diagram
+   * Export the dependency graph as a Mermaid diagram with hierarchy visualization
    * @param workflowId - Optional workflow ID to filter by
-   * @returns Mermaid flowchart TD string
+   * @returns Mermaid flowchart TD string with nested subgraphs for parent-child relationships
    */
   exportMermaid(workflowId?: string): string {
     const { nodes, edges } = this.getDependencyGraph(workflowId);
     
+    // Handle empty graph
+    if (nodes.length === 0) {
+      return 'flowchart TD\n  %% No tasks to display\n';
+    }
+    
     let mermaid = 'flowchart TD\n';
+    
+    // Add legend comment
+    mermaid += '  %% Legend: Subgraphs = hierarchy (parent-child), Arrows = dependencies\n';
     
     // Add CSS class definitions for status-based colors
     mermaid += '  classDef green fill:#90EE90,stroke:#4CAF50,stroke-width:2px,color:#000\n';
     mermaid += '  classDef red fill:#FFB6C1,stroke:#F44336,stroke-width:2px,color:#000\n';
     mermaid += '  classDef blue fill:#87CEEB,stroke:#2196F3,stroke-width:2px,color:#000\n';
     mermaid += '  classDef gray fill:#E0E0E0,stroke:#9E9E9E,stroke-width:2px,color:#000\n';
+    mermaid += '  classDef orange fill:#FFD700,stroke:#FF8C00,stroke-width:2px,color:#000\n';
     
-    // Add nodes
+    // Build parent-child map
+    const parentToChildren = new Map<string, Task[]>();
+    const childToParent = new Map<string, string>();
+    const taskSet = new Set(nodes.map(n => n.id));
+    
     for (const node of nodes) {
-      const label = node.name.replace(/"/g, '\\"');
-      const statusColor = node.status === 'completed' ? 'green' : 
-                          node.status === 'failed' ? 'red' : 
-                          node.status === 'in_progress' ? 'blue' : 'gray';
-      mermaid += `  ${node.id}["${label}"]:::${statusColor}\n`;
+      if (node.parentTaskId) {
+        if (!parentToChildren.has(node.parentTaskId)) {
+          parentToChildren.set(node.parentTaskId, []);
+        }
+        parentToChildren.get(node.parentTaskId)!.push(node);
+        childToParent.set(node.id, node.parentTaskId);
+      }
     }
     
-    // Add edges
+    // Identify root tasks (no parent or parent not in current graph)
+    const rootTasks = nodes.filter(node => {
+      if (!node.parentTaskId) return true;
+      return !taskSet.has(node.parentTaskId);
+    });
+    
+    // Track which tasks have been rendered
+    const renderedTasks = new Set<string>();
+    
+    // Recursively generate subgraph for a parent and its descendants
+    const generateSubgraph = (parent: Task, depth: number = 0): void => {
+      const children = parentToChildren.get(parent.id);
+      if (!children || children.length === 0) return;
+      
+      const indent = '  '.repeat(depth + 1);
+      const parentLabel = parent.name.replace(/"/g, '\\"');
+      mermaid += `${indent}subgraph ${parent.id} ["${parentLabel}"]\n`;
+      mermaid += `${indent}  direction TB\n`;
+      
+      // Render children
+      for (const child of children) {
+        renderedTasks.add(child.id);
+        const childLabel = child.name.replace(/"/g, '\\"');
+        const statusColor = child.status === 'completed' ? 'green' : 
+                            child.status === 'failed' ? 'red' : 
+                            child.status === 'in_progress' ? 'blue' : 
+                            (child.status === 'pending' && (child.priority || 0) >= 5) ? 'orange' : 'gray';
+        mermaid += `${indent}  ${child.id}["${childLabel}"]:::${statusColor}\n`;
+        
+        // Recursively render nested subgraphs for this child if it has children
+        generateSubgraph(child, depth + 1);
+      }
+      
+      mermaid += `${indent}end\n`;
+    };
+    
+    // Generate subgraphs for root tasks that have children
+    for (const root of rootTasks) {
+      generateSubgraph(root);
+    }
+    
+    // Render orphaned children (parentTaskId points to non-existent task in current graph)
+    const orphanedChildren = nodes.filter(node => 
+      node.parentTaskId && !taskSet.has(node.parentTaskId) && !renderedTasks.has(node.id)
+    );
+    
+    if (orphanedChildren.length > 0) {
+      mermaid += '  %% Orphaned tasks (parent not in current graph)\n';
+      for (const orphan of orphanedChildren) {
+        renderedTasks.add(orphan.id);
+        const label = orphan.name.replace(/"/g, '\\"');
+        const statusColor = orphan.status === 'completed' ? 'green' : 
+                            orphan.status === 'failed' ? 'red' : 
+                            orphan.status === 'in_progress' ? 'blue' : 
+                            (orphan.status === 'pending' && (orphan.priority || 0) >= 5) ? 'orange' : 'gray';
+        mermaid += `  ${orphan.id}["${label} (orphaned)"]:::${statusColor}\n`;
+      }
+    }
+    
+    // Render all remaining tasks (standalone tasks and parent nodes)
+    for (const node of nodes) {
+      if (!renderedTasks.has(node.id)) {
+        const label = node.name.replace(/"/g, '\\"');
+        const statusColor = node.status === 'completed' ? 'green' : 
+                            node.status === 'failed' ? 'red' : 
+                            node.status === 'in_progress' ? 'blue' : 
+                            (node.status === 'pending' && (node.priority || 0) >= 5) ? 'orange' : 'gray';
+        mermaid += `  ${node.id}["${label}"]:::${statusColor}\n`;
+        renderedTasks.add(node.id);
+      }
+    }
+    
+    // Add dependency edges (these can reference nodes inside subgraphs)
     for (const edge of edges) {
       const style = edge.type === 'soft' ? '-.->' : edge.type === 'conditional' ? '==>?' : '-->';
       mermaid += `  ${edge.from} ${style} ${edge.to}\n`;
     }
     
+    return mermaid;
+  }
+
+  /**
+   * Export a strategy as a Mermaid diagram showing all workflows and their tasks
+   * @param strategyId - Strategy ID or name
+   * @returns Mermaid diagram string
+   */
+  exportStrategyMermaid(strategyId: string): string {
+    const strategy = this.resolveStrategyIdentifier(strategyId);
+    if (!strategy) {
+      throw new StrategyNotFoundError(strategyId);
+    }
+
+    const workflows = this.getWorkflowsByStrategy(strategy.id);
+
+    // Handle empty strategy
+    if (workflows.length === 0) {
+      return `flowchart TD\n  %% Strategy: ${strategy.name}\n  %% No workflows to display\n`;
+    }
+
+    let mermaid = 'flowchart TD\n';
+    mermaid += `  %% Strategy: ${strategy.name}\n`;
+    mermaid += `  %% Description: ${strategy.description || 'N/A'}\n`;
+    mermaid += `  %% Status: ${strategy.status}\n\n`;
+
+    // Add CSS class definitions for status-based colors
+    mermaid += '  classDef green fill:#90EE90,stroke:#4CAF50,stroke-width:2px,color:#000\n';
+    mermaid += '  classDef red fill:#FFB6C1,stroke:#F44336,stroke-width:2px,color:#000\n';
+    mermaid += '  classDef blue fill:#87CEEB,stroke:#2196F3,stroke-width:2px,color:#000\n';
+    mermaid += '  classDef gray fill:#E0E0E0,stroke:#9E9E9E,stroke-width:2px,color:#000\n';
+    mermaid += '  classDef orange fill:#FFD700,stroke:#FF8C00,stroke-width:2px,color:#000\n';
+    mermaid += '  classDef purple fill:#E1BEE7,stroke:#9C27B0,stroke-width:2px,color:#000\n';
+    mermaid += '\n';
+
+    // Create a subgraph for each workflow
+    for (const workflow of workflows) {
+      const workflowLabel = workflow.name.replace(/"/g, '\\"');
+      mermaid += `  subgraph workflow_${workflow.id} ["${workflowLabel}"]\n`;
+      mermaid += `    direction TB\n`;
+      mermaid += `    %% Tasks: ${workflow.taskIds.length}\n`;
+      mermaid += `    %% Created: ${workflow.createdAt}\n`;
+
+      // Get all tasks for this workflow
+      const workflowTasks: Task[] = [];
+      for (const taskId of workflow.taskIds) {
+        const task = this.state.tasks.get(taskId);
+        if (task) {
+          workflowTasks.push(task);
+        }
+      }
+
+      // Build parent-child map for this workflow
+      const parentToChildren = new Map<string, Task[]>();
+      const childToParent = new Map<string, string>();
+      const taskSet = new Set(workflowTasks.map(t => t.id));
+
+      for (const task of workflowTasks) {
+        if (task.parentTaskId && taskSet.has(task.parentTaskId)) {
+          if (!parentToChildren.has(task.parentTaskId)) {
+            parentToChildren.set(task.parentTaskId, []);
+          }
+          parentToChildren.get(task.parentTaskId)!.push(task);
+          childToParent.set(task.id, task.parentTaskId);
+        }
+      }
+
+      // Identify root tasks (no parent in this workflow)
+      const rootTasks = workflowTasks.filter(task => !task.parentTaskId || !taskSet.has(task.parentTaskId));
+
+      // Track which tasks have been rendered
+      const renderedTasks = new Set<string>();
+
+      // Recursively generate subgraph for a parent and its descendants
+      const generateSubgraph = (parent: Task, depth: number = 0): void => {
+        const children = parentToChildren.get(parent.id);
+        if (!children || children.length === 0) return;
+
+        const indent = '    '.repeat(depth + 1);
+        const parentLabel = parent.name.replace(/"/g, '\\"');
+        mermaid += `${indent}subgraph ${parent.id} ["${parentLabel}"]\n`;
+        mermaid += `${indent}  direction TB\n`;
+
+        // Render children
+        for (const child of children) {
+          renderedTasks.add(child.id);
+          const childLabel = child.name.replace(/"/g, '\\"');
+          const statusColor = child.status === 'completed' ? 'green' :
+                              child.status === 'failed' ? 'red' :
+                              child.status === 'in_progress' ? 'blue' :
+                              (child.status === 'pending' && (child.priority || 0) >= 5) ? 'orange' : 'gray';
+          mermaid += `${indent}  ${child.id}["${childLabel}"]:::${statusColor}\n`;
+
+          // Recursively render nested subgraphs for this child if it has children
+          generateSubgraph(child, depth + 1);
+        }
+
+        mermaid += `${indent}end\n`;
+      };
+
+      // Generate subgraphs for root tasks that have children
+      for (const root of rootTasks) {
+        generateSubgraph(root);
+      }
+
+      // Render all remaining tasks (standalone tasks and parent nodes)
+      for (const task of workflowTasks) {
+        if (!renderedTasks.has(task.id)) {
+          const label = task.name.replace(/"/g, '\\"');
+          const statusColor = task.status === 'completed' ? 'green' :
+                              task.status === 'failed' ? 'red' :
+                              task.status === 'in_progress' ? 'blue' :
+                              (task.status === 'pending' && (task.priority || 0) >= 5) ? 'orange' : 'gray';
+          mermaid += `    ${task.id}["${label}"]:::${statusColor}\n`;
+          renderedTasks.add(task.id);
+        }
+      }
+
+      // Add dependency edges within this workflow
+      for (const task of workflowTasks) {
+        for (const dep of task.dependencies) {
+          if (taskSet.has(dep.taskId)) {
+            const style = dep.type === 'soft' ? '-.->' : dep.type === 'conditional' ? '==>?' : '-->';
+            mermaid += `    ${dep.taskId} ${style} ${task.id}\n`;
+          }
+        }
+      }
+
+      mermaid += '  end\n\n';
+    }
+
+    // Add workflow-level connections if any (optional - could show workflow dependencies)
+    mermaid += '  %% Legend: Subgraphs = workflows, Nested subgraphs = task hierarchy, Arrows = dependencies\n';
+
     return mermaid;
   }
 

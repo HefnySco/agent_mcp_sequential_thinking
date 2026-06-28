@@ -1963,6 +1963,101 @@ for (const testCase of testCases) {
           });
         });
       });
+
+      describe('exportMermaid with hierarchy', () => {
+        it('should generate Mermaid with nested subgraphs for parent-child relationships', () => {
+          // Create a parent task
+          const parentTask = service.createTask({
+            name: 'Parent Task',
+            description: 'Main parent task'
+          });
+
+          // Create child tasks
+          const child1 = service.createTask({
+            name: 'Child Task 1',
+            parentTaskId: parentTask.id
+          });
+
+          const child2 = service.createTask({
+            name: 'Child Task 2',
+            parentTaskId: parentTask.id,
+            dependencies: [{ taskId: child1.id, type: 'hard' }]
+          });
+
+          // Create nested child (grandchild)
+          const grandchild = service.createTask({
+            name: 'Grandchild Task',
+            parentTaskId: child2.id
+          });
+
+          // Create a standalone task
+          const standaloneTask = service.createTask({
+            name: 'Standalone Task'
+          });
+
+          // Create workflow
+          const workflow = service.createWorkflow('Hierarchy Test', [
+            parentTask.id, child1.id, child2.id, grandchild.id, standaloneTask.id
+          ]);
+
+          // Export Mermaid
+          const mermaid = service.exportMermaid(workflow.id);
+
+          // Verify it contains subgraph for parent
+          assert.ok(mermaid.includes('subgraph'), 'Should contain subgraph');
+          assert.ok(mermaid.includes(parentTask.id), 'Should contain parent task ID');
+          assert.ok(mermaid.includes('Parent Task'), 'Should contain parent task name');
+          
+          // Verify it contains nested subgraph for child
+          assert.ok(mermaid.includes(child2.id), 'Should contain child task ID');
+          
+          // Verify it contains legend
+          assert.ok(mermaid.includes('Legend: Subgraphs = hierarchy'), 'Should contain legend');
+          
+          // Verify it contains dependency edges
+          assert.ok(mermaid.includes('-->'), 'Should contain dependency arrows');
+          
+          // Verify it contains status classes
+          assert.ok(mermaid.includes('classDef'), 'Should contain class definitions');
+        });
+
+        it('should handle orphaned children gracefully', () => {
+          // Create a task with a non-existent parent
+          const orphanedTask = service.createTask({
+            name: 'Orphaned Task',
+            parentTaskId: 'non-existent-parent-id'
+          });
+
+          const mermaid = service.exportMermaid();
+          
+          // Should render the task with orphaned label
+          assert.ok(mermaid.includes('Orphaned Task'), 'Should contain orphaned task');
+          assert.ok(mermaid.includes('orphaned'), 'Should mark as orphaned');
+        });
+
+        it('should handle empty graph', () => {
+          service.clearAll();
+          const mermaid = service.exportMermaid();
+          
+          assert.ok(mermaid.includes('No tasks to display'), 'Should handle empty graph');
+        });
+
+        it('should render flat workflows without hierarchy correctly', () => {
+          const task1 = service.createTask({ name: 'Task 1' });
+          const task2 = service.createTask({ 
+            name: 'Task 2',
+            dependencies: [{ taskId: task1.id, type: 'hard' }]
+          });
+
+          const mermaid = service.exportMermaid();
+          
+          // Should not contain subgraph for flat workflow (no parent-child relationships)
+          assert.ok(!mermaid.includes('subgraph'), 'Should not contain subgraph for flat workflow');
+          assert.ok(mermaid.includes('Task 1'), 'Should contain task 1');
+          assert.ok(mermaid.includes('Task 2'), 'Should contain task 2');
+          assert.ok(mermaid.includes('-->'), 'Should contain dependency arrow');
+        });
+      });
     });
   });
 }

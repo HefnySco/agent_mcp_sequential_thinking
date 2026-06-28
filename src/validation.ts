@@ -7,6 +7,11 @@ import type { TaskStatus } from './types.js';
 const TaskStatusSchema = z.enum(['pending', 'in_progress', 'completed', 'failed']);
 
 /**
+ * Zod schema for strategy status validation
+ */
+const StrategyStatusSchema = z.enum(['active', 'archived', 'completed']);
+
+/**
  * Zod schema for RichDependency metadata
  */
 const DependencyMetadataSchema = z.object({
@@ -112,7 +117,8 @@ export const CleanupTasksSchema = z.object({
  */
 export const CreateWorkflowSchema = z.object({
   name: z.string().min(1, 'Workflow name is required').max(255, 'Workflow name must be less than 255 characters'),
-  taskIds: z.array(z.string().min(1)).min(1, 'At least one task ID is required')
+  taskIds: z.array(z.string().min(1)).min(1, 'At least one task ID is required'),
+  strategyId: z.string().optional()
 });
 
 /**
@@ -286,6 +292,15 @@ export const ExportGraphImageSchema = z.object({
 });
 
 /**
+ * Zod schema for exporting strategy as Mermaid diagram
+ */
+export const ExportStrategyMermaidSchema = z.object({
+  strategyId: z.string(),
+  format: z.enum(['mmd', 'png', 'svg']).default('mmd'),
+  filename: z.string().optional()
+});
+
+/**
  * Zod schema for getting blocked tasks
  */
 export const GetBlockedTasksSchema = z.object({
@@ -347,12 +362,87 @@ export const ImportWorkflowBundleSchema = z.object({
     version: z.string().min(1, 'Bundle version is required'),
     exportedAt: z.string(),
     templateName: z.string().optional(),
-    tags: z.array(z.string()).optional(),
     nameToIdMap: z.record(z.string(), z.string()).optional(),
     idToNameMap: z.record(z.string(), z.string()).optional(),
     humanReadableOnly: z.boolean().optional()
-  }),
+  }).strict(),
   namePrefix: z.string().optional(),
   deduplication: DeduplicationStrategySchema,
   nameRemapping: z.record(z.string(), z.string()).optional()
+});
+
+// ============================================================================
+// STRATEGY VALIDATION SCHEMAS
+// ============================================================================
+
+/**
+ * Zod schema for creating a strategy
+ */
+export const CreateStrategySchema = z.object({
+  name: z.string().min(1, 'Strategy name is required').max(255, 'Strategy name must be less than 255 characters'),
+  description: z.string().max(1000, 'Description must be less than 1000 characters').optional(),
+  tags: z.array(z.string()).optional()
+});
+
+/**
+ * Zod schema for getting a strategy
+ */
+export const GetStrategySchema = z.object({
+  id: z.string().min(1, 'Strategy ID or name is required')
+});
+
+/**
+ * Zod schema for listing strategies
+ */
+export const ListStrategiesSchema = z.object({
+  status: StrategyStatusSchema.optional()
+});
+
+/**
+ * Zod schema for updating a strategy
+ */
+export const UpdateStrategySchema = z.object({
+  id: z.string().min(1, 'Strategy ID or name is required'),
+  name: z.string().min(1).max(255).optional(),
+  description: z.string().max(1000).optional(),
+  status: StrategyStatusSchema.optional(),
+  tags: z.array(z.string()).optional()
+});
+
+/**
+ * Zod schema for deleting a strategy
+ */
+export const DeleteStrategySchema = z.object({
+  id: z.string().min(1, 'Strategy ID or name is required')
+});
+
+/**
+ * Zod schema for moving a workflow to a strategy
+ */
+export const MoveWorkflowToStrategySchema = z.object({
+  workflowId: z.string().min(1, 'Workflow ID is required'),
+  strategyId: z.string().min(1, 'Strategy ID or name is required')
+});
+
+/**
+ * Zod schema for removing a workflow from a strategy
+ */
+export const RemoveWorkflowFromStrategySchema = z.object({
+  workflowId: z.string().min(1, 'Workflow ID is required')
+});
+
+/**
+ * Zod schema for cloning a workflow to a strategy
+ */
+export const CloneWorkflowToStrategySchema = z.object({
+  workflowId: z.string().min(1, 'Source Workflow ID is required'),
+  strategyId: z.string().min(1, 'Target Strategy ID or name is required'),
+  namePrefix: z.string().optional()
+});
+
+/**
+ * Zod schema for getting workflows by strategy
+ */
+export const GetWorkflowsByStrategySchema = z.object({
+  strategyId: z.string().min(1, 'Strategy ID or name is required')
 });

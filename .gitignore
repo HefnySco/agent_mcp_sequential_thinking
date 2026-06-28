@@ -6,5 +6,9 @@ task-orchestrator-storage.json
 task-orchestrator-storage.db
 # Log files
 task-orchestrator-log-*.json
+# Output directories and files
 output/
 output.test
+# Test configurations and artifacts
+test-*.json
+mcp-publisher

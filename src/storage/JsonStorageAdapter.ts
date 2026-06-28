@@ -4,7 +4,8 @@ import type {
   Task,
   SequentialState,
   Workflow,
-  WorkflowRun
+  WorkflowRun,
+  Strategy
 } from '../types.js';
 import type { IStorageAdapter } from './IStorageAdapter.js';
 import { StorageError } from '../errors.js';
@@ -69,14 +70,19 @@ export class JsonStorageAdapter implements IStorageAdapter {
         Object.entries(parsed.workflowRuns || {}).map(([id, run]: [string, unknown]) => [id, run as WorkflowRun])
       );
 
-      return { tasks, workflows, workflowRuns };
+      const strategies = new Map<string, Strategy>(
+        Object.entries(parsed.strategies || {}).map(([id, strategy]: [string, unknown]) => [id, strategy as Strategy])
+      );
+
+      return { tasks, workflows, workflowRuns, strategies };
     } catch (err) {
       // Only return empty state if file doesn't exist
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return {
           tasks: new Map(),
           workflows: new Map(),
-          workflowRuns: new Map()
+          workflowRuns: new Map(),
+          strategies: new Map()
         };
       }
       // For any other error (including JSON corruption), fail fast
@@ -93,9 +99,10 @@ export class JsonStorageAdapter implements IStorageAdapter {
       const data = {
         tasks: Object.fromEntries(state.tasks),
         workflows: Object.fromEntries(state.workflows),
-        workflowRuns: Object.fromEntries(state.workflowRuns)
+        workflowRuns: Object.fromEntries(state.workflowRuns),
+        strategies: Object.fromEntries(state.strategies)
       };
-      
+
       const dir = path.dirname(this.storagePath);
       await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(this.storagePath, JSON.stringify(data, null, 2));

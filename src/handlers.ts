@@ -1,10 +1,11 @@
 import { TaskOrchestratorService } from './taskOrchestratorService.js';
 import { getLogger } from './logger.js';
-import { 
-  ValidationError, 
-  TaskNotFoundError, 
+import {
+  ValidationError,
+  TaskNotFoundError,
   WorkflowNotFoundError,
-  TaskExecutionError
+  TaskExecutionError,
+  StrategyNotFoundError
 } from './errors.js';
 import type { Task } from './types.js';
 import { renderMermaid } from './utils/mermaidRenderer.js';
@@ -37,10 +38,20 @@ import {
   GetDependencyGraphSchema,
   ExportMermaidSchema,
   ExportGraphImageSchema,
+  ExportStrategyMermaidSchema,
   GetBlockedTasksSchema,
   GetCriticalPathSchema,
   ExportWorkflowBundleSchema,
-  ImportWorkflowBundleSchema
+  ImportWorkflowBundleSchema,
+  CreateStrategySchema,
+  GetStrategySchema,
+  ListStrategiesSchema,
+  UpdateStrategySchema,
+  DeleteStrategySchema,
+  MoveWorkflowToStrategySchema,
+  RemoveWorkflowFromStrategySchema,
+  CloneWorkflowToStrategySchema,
+  GetWorkflowsByStrategySchema
 } from './validation.js';
 import { ERROR_MESSAGES } from './constants.js';
 
@@ -680,15 +691,29 @@ export async function handleCreateWorkflow(
   const validated = CreateWorkflowSchema.parse(args);
 
   const workflow = service.createWorkflow(validated.name, validated.taskIds);
-  
+
+  // Attach to strategy if provided
+  if (validated.strategyId) {
+    const strategy = service.resolveStrategyIdentifier(validated.strategyId);
+    if (strategy) {
+      workflow.strategyId = strategy.id;
+      await service.forceSave();
+    }
+  }
+
   await service.forceSave();
 
-  const displayOutput = `✅ Workflow created successfully\n\n**Name:** ${validated.name}\n**Workflow ID:** ${workflow.id}\n**Tasks:** ${validated.taskIds.length}\n**Task IDs:** ${validated.taskIds.join(', ')}`;
+  const strategyInfo = workflow.strategyId
+    ? `\n**Strategy ID:** ${workflow.strategyId}`
+    : '';
+
+  const displayOutput = `✅ Workflow created successfully\n\n**Name:** ${validated.name}\n**Workflow ID:** ${workflow.id}\n**Tasks:** ${validated.taskIds.length}\n**Task IDs:** ${validated.taskIds.join(', ')}${strategyInfo}`;
   const data = {
     workflow: {
       id: workflow.id,
       name: validated.name,
-      taskIds: validated.taskIds
+      taskIds: validated.taskIds,
+      strategyId: workflow.strategyId
     }
   };
 
@@ -1372,7 +1397,9 @@ export async function handleExportMermaid(
   const mermaid = service.exportMermaid(validated.workflowId);
 
   // Generate default filename if not provided
-  const filename = validated.filename || `workflow-mermaid.${validated.format}`;
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const workflowId = validated.workflowId ? `${validated.workflowId}-` : '';
+  const filename = validated.filename || `workflow-${workflowId}${timestamp}.${validated.format}`;
   const filePath = path.resolve(filename);
 
   // If format is mmd, save as text file and use new JSON response format
@@ -1467,6 +1494,73 @@ export async function handleExportGraphImage(
     return result;
   } catch (error) {
     throw new Error(`Failed to render graph image: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/**
+ * Export strategy as Mermaid diagram handler
+ */
+export async function handleExportStrategyMermaid(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> }> {
+  const { service, logger } = context;
+
+  const validated = ExportStrategyMermaidSchema.parse(args);
+
+  const mermaid = service.exportStrategyMermaid(validated.strategyId);
+
+  // Generate default filename if not provided
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const strategyId = validated.strategyId.replace(/[^a-zA-Z0-9-]/g, '-');
+  const filename = validated.filename || `strategy-${strategyId}-${timestamp}.${validated.format}`;
+  const filePath = path.resolve(filename);
+
+  // If format is mmd, save as text file and use new JSON response format
+  if (validated.format === 'mmd') {
+    await fs.writeFile(filePath, mermaid, 'utf-8');
+    
+    const displayOutput = `📊 Strategy Mermaid diagram saved to: ${filePath}\n\n\`\`\`mermaid\n${mermaid}\n\`\`\``;
+    const data = {
+      filePath,
+      format: 'mmd',
+      mermaid
+    };
+
+    const result = createSuccessResponse(data, displayOutput, 'export_strategy_mermaid');
+
+    await logger.logToolRequest('export_strategy_mermaid', args, result);
+    return result;
+  }
+
+  // Render to PNG or SVG and return as image
+  try {
+    const rendered = await renderMermaid(mermaid, validated.format);
+    
+    // Decode base64 and save to file
+    const buffer = Buffer.from(rendered.data, 'base64');
+    await fs.writeFile(filePath, buffer);
+    
+    // Return image response for image formats
+    const mimeType = validated.format === 'png' ? 'image/png' : 'image/svg+xml';
+    const result = {
+      content: [
+        {
+          type: 'image',
+          data: rendered.data,
+          mimeType
+        },
+        {
+          type: 'text',
+          text: `📊 Strategy Mermaid diagram saved to: ${filePath}`
+        }
+      ]
+    };
+
+    await logger.logToolRequest('export_strategy_mermaid', args, result);
+    return result;
+  } catch (error) {
+    throw new Error(`Failed to render strategy Mermaid diagram: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -1637,6 +1731,331 @@ export async function handleImportWorkflowBundle(
   return result;
 }
 
+// ============================================================================
+// STRATEGY HANDLERS
+// ============================================================================
+
+/**
+ * Create strategy handler
+ */
+export async function handleCreateStrategy(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = CreateStrategySchema.parse(args);
+
+  const strategy = service.createStrategy(
+    validated.name,
+    validated.description,
+    validated.tags
+  );
+
+  await service.forceSave();
+
+  const displayOutput = `✅ Strategy Created Successfully\n\n**Strategy ID:** ${strategy.id}\n**Name:** ${strategy.name}\n**Description:** ${strategy.description || 'None'}\n**Status:** ${strategy.status}\n**Tags:** ${strategy.tags?.join(', ') || 'None'}`;
+  const data = {
+    id: strategy.id,
+    name: strategy.name,
+    description: strategy.description,
+    status: strategy.status,
+    tags: strategy.tags
+  };
+
+  const result = createSuccessResponse(data, displayOutput, 'create_strategy');
+  await logger.logToolRequest('create_strategy', args, result);
+  return result;
+}
+
+/**
+ * Get strategy handler
+ */
+export async function handleGetStrategy(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = GetStrategySchema.parse(args);
+
+  const strategy = service.resolveStrategyIdentifier(validated.id);
+  if (!strategy) {
+    throw new StrategyNotFoundError(validated.id);
+  }
+
+  const displayOutput = `📋 Strategy Details\n\n**ID:** ${strategy.id}\n**Name:** ${strategy.name}\n**Description:** ${strategy.description || 'None'}\n**Status:** ${strategy.status}\n**Created:** ${strategy.createdAt}\n**Updated:** ${strategy.updatedAt}\n**Tags:** ${strategy.tags?.join(', ') || 'None'}`;
+  const data = {
+    id: strategy.id,
+    name: strategy.name,
+    description: strategy.description,
+    status: strategy.status,
+    createdAt: strategy.createdAt,
+    updatedAt: strategy.updatedAt,
+    tags: strategy.tags
+  };
+
+  const result = createSuccessResponse(data, displayOutput, 'get_strategy');
+  await logger.logToolRequest('get_strategy', args, result);
+  return result;
+}
+
+/**
+ * List strategies handler
+ */
+export async function handleListStrategies(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = ListStrategiesSchema.parse(args);
+
+  const allStrategies = service.getAllStrategies();
+  let strategies = Object.values(allStrategies);
+
+  if (validated.status) {
+    strategies = strategies.filter(s => s.status === validated.status);
+  }
+
+  if (strategies.length === 0) {
+    const displayOutput = `📋 No strategies found${validated.status ? ` with status '${validated.status}'` : ''}`;
+    const result = createSuccessResponse({ strategies: [] }, displayOutput, 'list_strategies');
+    await logger.logToolRequest('list_strategies', args, result);
+    return result;
+  }
+
+  const strategySummaries = strategies.map(s =>
+    `- **${s.name}** (ID: ${s.id})\n  Status: ${s.status}\n  Description: ${s.description || 'None'}\n  Tags: ${s.tags?.join(', ') || 'None'}`
+  ).join('\n\n');
+
+  const displayOutput = `📋 Strategies (${strategies.length})\n\n${strategySummaries}`;
+  const data = {
+    strategies: strategies.map(s => ({
+      id: s.id,
+      name: s.name,
+      description: s.description,
+      status: s.status,
+      tags: s.tags
+    }))
+  };
+
+  const result = createSuccessResponse(data, displayOutput, 'list_strategies');
+  await logger.logToolRequest('list_strategies', args, result);
+  return result;
+}
+
+/**
+ * Update strategy handler
+ */
+export async function handleUpdateStrategy(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = UpdateStrategySchema.parse(args);
+
+  const strategy = service.updateStrategy(validated.id, {
+    name: validated.name,
+    description: validated.description,
+    status: validated.status,
+    tags: validated.tags
+  });
+
+  if (!strategy) {
+    throw new StrategyNotFoundError(validated.id);
+  }
+
+  await service.forceSave();
+
+  const displayOutput = `✅ Strategy Updated Successfully\n\n**ID:** ${strategy.id}\n**Name:** ${strategy.name}\n**Description:** ${strategy.description || 'None'}\n**Status:** ${strategy.status}\n**Tags:** ${strategy.tags?.join(', ') || 'None'}`;
+  const data = {
+    id: strategy.id,
+    name: strategy.name,
+    description: strategy.description,
+    status: strategy.status,
+    tags: strategy.tags
+  };
+
+  const result = createSuccessResponse(data, displayOutput, 'update_strategy');
+  await logger.logToolRequest('update_strategy', args, result);
+  return result;
+}
+
+/**
+ * Delete strategy handler
+ */
+export async function handleDeleteStrategy(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = DeleteStrategySchema.parse(args);
+
+  const strategy = service.getStrategy(validated.id) || service.getStrategyByName(validated.id);
+  if (!strategy) {
+    throw new StrategyNotFoundError(validated.id);
+  }
+
+  const deleted = service.deleteStrategy(strategy.id);
+
+  if (!deleted) {
+    throw new StrategyNotFoundError(validated.id);
+  }
+
+  await service.forceSave();
+
+  const displayOutput = `✅ Strategy Deleted Successfully\n\n**ID:** ${strategy.id}\n**Name:** ${strategy.name}\n\nNote: Workflows in this strategy have been ungrouped but not deleted.`;
+  const data = {
+    id: strategy.id,
+    name: strategy.name
+  };
+
+  const result = createSuccessResponse(data, displayOutput, 'delete_strategy');
+  await logger.logToolRequest('delete_strategy', args, result);
+  return result;
+}
+
+/**
+ * Move workflow to strategy handler
+ */
+export async function handleMoveWorkflowToStrategy(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = MoveWorkflowToStrategySchema.parse(args);
+
+  const workflow = service.moveWorkflowToStrategy(validated.workflowId, validated.strategyId);
+
+  await service.forceSave();
+
+  const strategy = service.getStrategy(workflow.strategyId!);
+
+  const displayOutput = `✅ Workflow Moved to Strategy\n\n**Workflow ID:** ${workflow.id}\n**Workflow Name:** ${workflow.name}\n**Strategy ID:** ${strategy?.id}\n**Strategy Name:** ${strategy?.name}`;
+  const data = {
+    workflowId: workflow.id,
+    workflowName: workflow.name,
+    strategyId: strategy?.id,
+    strategyName: strategy?.name
+  };
+
+  const result = createSuccessResponse(data, displayOutput, 'move_workflow_to_strategy');
+  await logger.logToolRequest('move_workflow_to_strategy', args, result);
+  return result;
+}
+
+/**
+ * Remove workflow from strategy handler
+ */
+export async function handleRemoveWorkflowFromStrategy(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = RemoveWorkflowFromStrategySchema.parse(args);
+
+  const workflow = service.removeWorkflowFromStrategy(validated.workflowId);
+
+  await service.forceSave();
+
+  const displayOutput = `✅ Workflow Removed from Strategy\n\n**Workflow ID:** ${workflow.id}\n**Workflow Name:** ${workflow.name}`;
+  const data = {
+    workflowId: workflow.id,
+    workflowName: workflow.name
+  };
+
+  const result = createSuccessResponse(data, displayOutput, 'remove_workflow_from_strategy');
+  await logger.logToolRequest('remove_workflow_from_strategy', args, result);
+  return result;
+}
+
+/**
+ * Clone workflow to strategy handler
+ */
+export async function handleCloneWorkflowToStrategy(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = CloneWorkflowToStrategySchema.parse(args);
+
+  const cloneResult = service.cloneWorkflowToStrategy(
+    validated.workflowId,
+    validated.strategyId,
+    { namePrefix: validated.namePrefix }
+  );
+
+  await service.forceSave();
+
+  const strategy = service.getStrategy(cloneResult.workflow.strategyId!);
+
+  const displayOutput = `✅ Workflow Cloned to Strategy\n\n**New Workflow ID:** ${cloneResult.workflow.id}\n**New Workflow Name:** ${cloneResult.workflow.name}\n**Strategy ID:** ${strategy?.id}\n**Strategy Name:** ${strategy?.name}\n**Tasks Cloned:** ${Object.keys(cloneResult.taskIdMap).length}\n**Name Prefix:** ${validated.namePrefix || 'None'}`;
+  const data = {
+    workflowId: cloneResult.workflow.id,
+    workflowName: cloneResult.workflow.name,
+    strategyId: strategy?.id,
+    strategyName: strategy?.name,
+    tasksCloned: Object.keys(cloneResult.taskIdMap).length,
+    taskIdMap: cloneResult.taskIdMap
+  };
+
+  const result = createSuccessResponse(data, displayOutput, 'clone_workflow_to_strategy');
+  await logger.logToolRequest('clone_workflow_to_strategy', args, result);
+  return result;
+}
+
+/**
+ * Get workflows by strategy handler
+ */
+export async function handleGetWorkflowsByStrategy(
+  context: HandlerContext,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const { service, logger } = context;
+
+  const validated = GetWorkflowsByStrategySchema.parse(args);
+
+  const strategy = service.resolveStrategyIdentifier(validated.strategyId);
+  if (!strategy) {
+    throw new StrategyNotFoundError(validated.strategyId);
+  }
+
+  const workflows = service.getWorkflowsByStrategy(strategy.id);
+
+  if (workflows.length === 0) {
+    const displayOutput = `📋 No workflows found in strategy '${strategy.name}'`;
+    const result = createSuccessResponse({ workflows: [] }, displayOutput, 'get_workflows_by_strategy');
+    await logger.logToolRequest('get_workflows_by_strategy', args, result);
+    return result;
+  }
+
+  const workflowSummaries = workflows.map(w =>
+    `- **${w.name}** (ID: ${w.id})\n  Tasks: ${w.taskIds.length}\n  Created: ${w.createdAt}`
+  ).join('\n\n');
+
+  const displayOutput = `📋 Workflows in Strategy '${strategy.name}' (${workflows.length})\n\n${workflowSummaries}`;
+  const data = {
+    strategyId: strategy.id,
+    strategyName: strategy.name,
+    workflows: workflows.map(w => ({
+      id: w.id,
+      name: w.name,
+      taskIds: w.taskIds,
+      createdAt: w.createdAt
+    }))
+  };
+
+  const result = createSuccessResponse(data, displayOutput, 'get_workflows_by_strategy');
+  await logger.logToolRequest('get_workflows_by_strategy', args, result);
+  return result;
+}
+
 /**
  * Handler registry mapping tool names to their handlers
  */
@@ -1676,8 +2095,18 @@ export const handlerRegistry: Record<string, (context: HandlerContext, args: Rec
   get_dependency_graph: handleGetDependencyGraph,
   export_mermaid: handleExportMermaid,
   export_graph_image: handleExportGraphImage,
+  export_strategy_mermaid: handleExportStrategyMermaid,
   get_blocked_tasks: handleGetBlockedTasks,
   get_critical_path: handleGetCriticalPath,
   export_workflow_bundle: handleExportWorkflowBundle,
-  import_workflow_bundle: handleImportWorkflowBundle
+  import_workflow_bundle: handleImportWorkflowBundle,
+  create_strategy: handleCreateStrategy,
+  get_strategy: handleGetStrategy,
+  list_strategies: handleListStrategies,
+  update_strategy: handleUpdateStrategy,
+  delete_strategy: handleDeleteStrategy,
+  move_workflow_to_strategy: handleMoveWorkflowToStrategy,
+  remove_workflow_from_strategy: handleRemoveWorkflowFromStrategy,
+  clone_workflow_to_strategy: handleCloneWorkflowToStrategy,
+  get_workflows_by_strategy: handleGetWorkflowsByStrategy
 };

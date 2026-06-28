@@ -417,6 +417,10 @@ class TaskOrchestratorMCPServer {
                     type: 'string'
                   },
                   description: 'Array of task IDs in the workflow. Tasks should be created first using create_tasks.'
+                },
+                strategyId: {
+                  type: 'string',
+                  description: 'Optional Strategy ID or name to attach this workflow to'
                 }
               },
               required: ['name', 'taskIds']
@@ -881,6 +885,197 @@ class TaskOrchestratorMCPServer {
                 }
               },
               required: ['bundle']
+            }
+          },
+          // ============================================================================
+          // STRATEGY TOOLS
+          // ============================================================================
+          {
+            name: 'create_strategy',
+            description: 'Create a new Strategy (Project/Initiative) to group related workflows. Strategies are opt-in organizational containers for cross-session coordination.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                name: {
+                  type: 'string',
+                  description: 'Human-friendly name (must be unique)'
+                },
+                description: {
+                  type: 'string',
+                  description: 'Optional description of the initiative'
+                },
+                tags: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Optional tags'
+                }
+              },
+              required: ['name']
+            }
+          },
+          {
+            name: 'get_strategy',
+            description: 'Get a Strategy by ID or name',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                id: {
+                  type: 'string',
+                  description: 'Strategy ID or name'
+                }
+              },
+              required: ['id']
+            }
+          },
+          {
+            name: 'list_strategies',
+            description: 'List all Strategies',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                status: {
+                  type: 'string',
+                  enum: ['active', 'archived', 'completed'],
+                  description: 'Filter by status (optional)'
+                }
+              }
+            }
+          },
+          {
+            name: 'update_strategy',
+            description: 'Update a Strategy',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                id: {
+                  type: 'string',
+                  description: 'Strategy ID or name'
+                },
+                name: {
+                  type: 'string',
+                  description: 'New name'
+                },
+                description: {
+                  type: 'string',
+                  description: 'New description'
+                },
+                status: {
+                  type: 'string',
+                  enum: ['active', 'archived', 'completed'],
+                  description: 'New status'
+                },
+                tags: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'New tags'
+                }
+              },
+              required: ['id']
+            }
+          },
+          {
+            name: 'delete_strategy',
+            description: 'Delete a Strategy. Workflows in the strategy become ungrouped (strategyId cleared).',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                id: {
+                  type: 'string',
+                  description: 'Strategy ID or name'
+                }
+              },
+              required: ['id']
+            }
+          },
+          {
+            name: 'move_workflow_to_strategy',
+            description: 'Move an existing Workflow into a Strategy. This is a metadata-only change - workflow ID and task IDs remain unchanged.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                workflowId: {
+                  type: 'string',
+                  description: 'Workflow ID'
+                },
+                strategyId: {
+                  type: 'string',
+                  description: 'Strategy ID or name'
+                }
+              },
+              required: ['workflowId', 'strategyId']
+            }
+          },
+          {
+            name: 'remove_workflow_from_strategy',
+            description: 'Remove a Workflow from its Strategy (ungroup it)',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                workflowId: {
+                  type: 'string',
+                  description: 'Workflow ID'
+                }
+              },
+              required: ['workflowId']
+            }
+          },
+          {
+            name: 'clone_workflow_to_strategy',
+            description: 'Clone an existing Workflow into a Strategy. Creates a completely independent copy with new Workflow ID and new Task IDs. Dependencies and parent relationships are properly remapped.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                workflowId: {
+                  type: 'string',
+                  description: 'Source Workflow ID'
+                },
+                strategyId: {
+                  type: 'string',
+                  description: 'Target Strategy ID or name'
+                },
+                namePrefix: {
+                  type: 'string',
+                  description: 'Optional prefix for cloned workflow and task names'
+                }
+              },
+              required: ['workflowId', 'strategyId']
+            }
+          },
+          {
+            name: 'get_workflows_by_strategy',
+            description: 'Get all Workflows belonging to a specific Strategy',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                strategyId: {
+                  type: 'string',
+                  description: 'Strategy ID or name'
+                }
+              },
+              required: ['strategyId']
+            }
+          },
+          {
+            name: 'export_strategy_mermaid',
+            description: 'Export a strategy as a Mermaid flowchart diagram showing all workflows and their tasks. **Generates an image (PNG) by default for display in the LLM chat.** Supports text (mmd), PNG, and SVG formats.\n\n**When to Use:**\n- When you want to visualize the entire strategy structure\n- To see all workflows and their tasks in one diagram\n- When reviewing strategy organization and task distribution\n- Before making major structural changes to a strategy\n\n**Best Practices:**\n- **Use `format: "png"`** in most cases for the best visual experience in the LLM chat\n- The diagram shows each workflow as a subgraph with its tasks\n- Tasks are color-coded by status (green=completed, red=failed, blue=in_progress, gray=pending, orange=high priority)\n- Task hierarchy (parent-child relationships) is shown as nested subgraphs\n- Dependencies between tasks are shown as arrows',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                strategyId: {
+                  type: 'string',
+                  description: 'Strategy ID or name'
+                },
+                format: {
+                  type: 'string',
+                  enum: ['mmd', 'png', 'svg'],
+                  description: 'Output format: mmd for raw text (default), png for image, svg for vector'
+                },
+                filename: {
+                  type: 'string',
+                  description: 'Optional filename for the output file'
+                }
+              },
+              required: ['strategyId']
             }
           }
         ]

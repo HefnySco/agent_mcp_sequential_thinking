@@ -32,6 +32,17 @@ export class WorkflowNotFoundError extends SequentialError {
 }
 
 /**
+ * Error thrown when a strategy is not found
+ */
+export class StrategyNotFoundError extends SequentialError {
+  constructor(strategyId: string) {
+    super(`Strategy with ID '${strategyId}' not found`, 'STRATEGY_NOT_FOUND');
+    this.name = 'StrategyNotFoundError';
+    Object.setPrototypeOf(this, StrategyNotFoundError.prototype);
+  }
+}
+
+/**
  * Error thrown when validation fails
  */
 export class ValidationError extends SequentialError {

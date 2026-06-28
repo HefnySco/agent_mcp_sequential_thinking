@@ -4,7 +4,8 @@ import type {
   Task,
   SequentialState,
   Workflow,
-  WorkflowRun
+  WorkflowRun,
+  Strategy
 } from '../types.js';
 import type { IStorageAdapter } from './IStorageAdapter.js';
 import { StorageError } from '../errors.js';
@@ -52,7 +53,7 @@ export class SqliteStorageAdapter implements IStorageAdapter {
           status TEXT NOT NULL,
           dependencies TEXT,
           priority INTEGER,
-          order INTEGER,
+          "order" INTEGER,
           parent_task_id TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
@@ -70,6 +71,7 @@ export class SqliteStorageAdapter implements IStorageAdapter {
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
           task_ids TEXT NOT NULL,
+          strategy_id TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -87,9 +89,22 @@ export class SqliteStorageAdapter implements IStorageAdapter {
           continue_on_failure INTEGER DEFAULT 0
         );
 
+        CREATE TABLE IF NOT EXISTS strategies (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL UNIQUE,
+          description TEXT,
+          status TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          tags TEXT,
+          metadata TEXT
+        );
+
         CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
         CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
         CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workflow_id);
+        CREATE INDEX IF NOT EXISTS idx_strategies_name ON strategies(name);
+        CREATE INDEX IF NOT EXISTS idx_strategies_status ON strategies(status);
       `);
     } catch (err) {
       throw new StorageError('Failed to initialize SQLite storage', err instanceof Error ? err : undefined);
@@ -167,8 +182,9 @@ export class SqliteStorageAdapter implements IStorageAdapter {
           id: workflowId,
           name: row[1] as string,
           taskIds: this.safeJsonParse(row[2] as string, [], { table: 'workflows', id: workflowId, field: 'taskIds' }),
-          createdAt: row[3] as string,
-          updatedAt: row[4] as string
+          strategyId: row[3] as string || undefined,
+          createdAt: row[4] as string,
+          updatedAt: row[5] as string
         };
         workflows.set(workflow.id, workflow);
       }
@@ -194,7 +210,26 @@ export class SqliteStorageAdapter implements IStorageAdapter {
         workflowRuns.set(run.id, run);
       }
 
-      return { tasks, workflows, workflowRuns };
+      // Load strategies
+      const strategies = new Map<string, Strategy>();
+      const strategyRows = this.db!.exec('SELECT * FROM strategies')[0]?.values || [];
+
+      for (const row of strategyRows) {
+        const strategyId = row[0] as string;
+        const strategy: Strategy = {
+          id: strategyId,
+          name: row[1] as string,
+          description: row[2] as string || undefined,
+          status: row[3] as Strategy['status'],
+          createdAt: row[4] as string,
+          updatedAt: row[5] as string,
+          tags: this.safeJsonParse(row[6] as string, undefined, { table: 'strategies', id: strategyId, field: 'tags' }),
+          metadata: this.safeJsonParse(row[7] as string, undefined, { table: 'strategies', id: strategyId, field: 'metadata' })
+        };
+        strategies.set(strategy.id, strategy);
+      }
+
+      return { tasks, workflows, workflowRuns, strategies };
     } catch (err) {
       throw new StorageError('Failed to load state from SQLite', err instanceof Error ? err : undefined);
     }
@@ -217,12 +252,13 @@ export class SqliteStorageAdapter implements IStorageAdapter {
       this.db!.run('DELETE FROM tasks');
       this.db!.run('DELETE FROM workflows');
       this.db!.run('DELETE FROM workflow_runs');
+      this.db!.run('DELETE FROM strategies');
 
       // Insert tasks
       for (const task of state.tasks.values()) {
         this.db!.run(`
           INSERT INTO tasks (
-            id, name, description, status, dependencies, priority, order,
+            id, name, description, status, dependencies, priority, "order",
             parent_task_id, created_at, updated_at, started_at,
             completed_at, retries, max_retries, timeout_ms, result, error, metadata
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -251,12 +287,13 @@ export class SqliteStorageAdapter implements IStorageAdapter {
       // Insert workflows
       for (const workflow of state.workflows.values()) {
         this.db!.run(`
-          INSERT INTO workflows (id, name, task_ids, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?)
+          INSERT INTO workflows (id, name, task_ids, strategy_id, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?)
         `, [
           workflow.id,
           workflow.name,
           JSON.stringify(workflow.taskIds),
+          workflow.strategyId || null,
           workflow.createdAt,
           workflow.updatedAt
         ]);
@@ -280,6 +317,23 @@ export class SqliteStorageAdapter implements IStorageAdapter {
           run.completedAt || null,
           run.error || null,
           run.continueOnFailure ? 1 : 0
+        ]);
+      }
+
+      // Insert strategies
+      for (const strategy of state.strategies.values()) {
+        this.db!.run(`
+          INSERT INTO strategies (id, name, description, status, created_at, updated_at, tags, metadata)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+          strategy.id,
+          strategy.name,
+          strategy.description || null,
+          strategy.status,
+          strategy.createdAt,
+          strategy.updatedAt,
+          strategy.tags ? JSON.stringify(strategy.tags) : null,
+          strategy.metadata ? JSON.stringify(strategy.metadata) : null
         ]);
       }
 
@@ -317,7 +371,8 @@ export class SqliteStorageAdapter implements IStorageAdapter {
       this.db.run('DELETE FROM tasks');
       this.db.run('DELETE FROM workflows');
       this.db.run('DELETE FROM workflow_runs');
-      
+      this.db.run('DELETE FROM strategies');
+
       // Save the cleared database
       const data = this.db.export();
       const buffer = Buffer.from(data);

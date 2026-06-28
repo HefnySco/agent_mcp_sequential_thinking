@@ -4,6 +4,11 @@
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 
 /**
+ * Strategy status enumeration
+ */
+export type StrategyStatus = 'active' | 'archived' | 'completed';
+
+/**
  * Rich dependency model - unified replacement for all fragmented dependency fields
  */
 export interface RichDependency {
@@ -120,12 +125,27 @@ export interface WorkflowRun {
 }
 
 /**
+ * Strategy interface representing a high-level initiative/project
+ */
+export interface Strategy {
+  id: string;
+  name: string;
+  description?: string;
+  status: StrategyStatus;
+  createdAt: string;
+  updatedAt: string;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+/**
  * Workflow interface representing a workflow definition
  */
 export interface Workflow {
   id: string;
   name: string;
   taskIds: string[];
+  strategyId?: string;
   createdAt: string;
   updatedAt: string;
   version?: string;
@@ -140,6 +160,7 @@ export interface SequentialState {
   tasks: Map<string, Task>;
   workflows: Map<string, Workflow>;
   workflowRuns: Map<string, WorkflowRun>;
+  strategies: Map<string, Strategy>;
 }
 
 /**

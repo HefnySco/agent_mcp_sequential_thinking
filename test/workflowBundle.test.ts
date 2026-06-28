@@ -359,6 +359,91 @@ for (const testCase of testCases) {
         assert.ok(importedParent);
         assert.strictEqual(importedChild?.parentTaskId, importedParent?.id);
       });
+
+      it('should handle slug-based task IDs during import', () => {
+        const task1 = service.createTask({ name: 'First Task' });
+        const task2 = service.createTask({ name: 'Second Task', dependencies: [{ taskId: task1.id, type: 'hard' }] });
+
+        const workflow = service.createWorkflow('Slug ID Test', [task1.id, task2.id]);
+        const bundle = service.exportWorkflowBundle(workflow.id);
+
+        service.clearAll();
+
+        // Import should handle slug-based IDs correctly
+        const importResult = service.importWorkflowBundle(bundle);
+        assert.ok(importResult);
+        assert.ok(importResult.newWorkflowId);
+
+        const newWorkflow = service.getWorkflow(importResult.newWorkflowId);
+        assert.ok(newWorkflow);
+        assert.strictEqual(newWorkflow?.taskIds.length, 2);
+      });
+
+      it('should use positional references for dependencies during import', () => {
+        const task1 = service.createTask({ name: 'Task A' });
+        const task2 = service.createTask({ name: 'Task B', dependencies: [{ taskId: task1.id, type: 'hard' }] });
+        const task3 = service.createTask({ name: 'Task C', dependencies: [{ taskId: task2.id, type: 'hard' }] });
+
+        const workflow = service.createWorkflow('Positional Ref Test', [task1.id, task2.id, task3.id]);
+        const bundle = service.exportWorkflowBundle(workflow.id);
+
+        service.clearAll();
+
+        const importResult = service.importWorkflowBundle(bundle);
+        const allTasks = service.getAllTasks();
+        
+        // Verify dependency chain is preserved
+        const importedTaskA = allTasks.find(t => t.name === 'Task A');
+        const importedTaskB = allTasks.find(t => t.name === 'Task B');
+        const importedTaskC = allTasks.find(t => t.name === 'Task C');
+
+        assert.ok(importedTaskA);
+        assert.ok(importedTaskB);
+        assert.ok(importedTaskC);
+        assert.strictEqual(importedTaskB?.dependencies.length, 1);
+        assert.strictEqual(importedTaskC?.dependencies.length, 1);
+      });
+    });
+
+    describe('Status-based color coding', () => {
+      it('should include CSS class definitions for status colors in mermaid export', () => {
+        const task1 = service.createTask({ name: 'Completed Task' });
+        const task2 = service.createTask({ name: 'Failed Task' });
+        const task3 = service.createTask({ name: 'In Progress Task' });
+        const task4 = service.createTask({ name: 'Pending Task' });
+
+        service.executeTask(task1.id);
+        service.failTask(task2.id, 'Test error');
+        service.markTaskInProgress(task3.id);
+
+        const workflow = service.createWorkflow('Color Test', [task1.id, task2.id, task3.id, task4.id]);
+        const mermaid = service.exportMermaid(workflow.id);
+
+        assert.ok(mermaid.includes('classDef green'));
+        assert.ok(mermaid.includes('classDef red'));
+        assert.ok(mermaid.includes('classDef blue'));
+        assert.ok(mermaid.includes('classDef gray'));
+      });
+
+      it('should assign correct color classes based on task status', () => {
+        const task1 = service.createTask({ name: 'Completed' });
+        const task2 = service.createTask({ name: 'Failed' });
+        const task3 = service.createTask({ name: 'InProgress' });
+        const task4 = service.createTask({ name: 'Pending' });
+
+        service.executeTask(task1.id);
+        service.failTask(task2.id, 'Error');
+        service.markTaskInProgress(task3.id);
+
+        const workflow = service.createWorkflow('Status Colors', [task1.id, task2.id, task3.id, task4.id]);
+        const mermaid = service.exportMermaid(workflow.id);
+
+        // Check that each task has the correct color class
+        assert.ok(mermaid.includes(':::green')); // completed
+        assert.ok(mermaid.includes(':::red')); // failed
+        assert.ok(mermaid.includes(':::blue')); // in_progress
+        assert.ok(mermaid.includes(':::gray')); // pending
+      });
     });
   });
 }

@@ -59,6 +59,40 @@ for (const testCase of testCases) {
         assert.ok(task.updatedAt);
       });
 
+      it('should generate slug-based task ID when name is provided', () => {
+        const task = service.createTask({
+          name: 'My Test Task'
+        });
+
+        // ID should be in format: slug-uuid
+        assert.ok(task.id.includes('my-test-task'));
+        assert.ok(task.id.includes('-'));
+        assert.ok(task.id.length > 20);
+      });
+
+      it('should handle special characters in task name for slug generation', () => {
+        const task = service.createTask({
+          name: 'Task@#$%^&*() Test'
+        });
+
+        // Special characters should be replaced with dashes
+        assert.ok(task.id.includes('task'));
+        assert.ok(task.id.includes('test'));
+        assert.ok(!task.id.includes('@'));
+        assert.ok(!task.id.includes('#'));
+      });
+
+      it('should limit slug length to 50 characters', () => {
+        const longName = 'A'.repeat(100);
+        const task = service.createTask({
+          name: longName
+        });
+
+        // Slug part should be limited
+        const parts = task.id.split('-');
+        assert.ok(parts[0].length <= 50);
+      });
+
       it('should create a task with optional fields', () => {
         const task = service.createTask({
           name: 'Test Task',
